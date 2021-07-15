@@ -75,10 +75,29 @@ func main() {
 
 ### Dependency
 
-- testify - github.com/stretchr/testify
-- go-redis - github.com/go-redis/redis/v8
-- miniredis - github.com/alicebob/miniredis/v2
+- testify
 
+  ```console
+    go get -u -v github.com/stretchr/testify
+  ```
+
+- go-redis  
+
+  ```console
+    go get -u -v github.com/go-redis/redis/v8
+  ```
+
+- miniredis
+
+  ```console
+    go get -u -v github.com/alicebob/miniredis/v2
+  ```
+
+- null.v3  
+
+  ```console
+    go get -u -v gopkg.in/guregu/null.v3
+  ```
 
 ## TODO
 
