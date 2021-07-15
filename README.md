@@ -20,7 +20,7 @@ import (
 )
 
 var (
-    scriptDefinition = "scriptor_v.0.0.0"
+    scriptDefinition = "scriptKey|0.0.0"
 
     hello               = "hello"
     _HelloworldTemplate = `
@@ -101,8 +101,8 @@ func main() {
 
 ## TODO
 
-1. [ ] Add test cases using "testify".
-2. [ ] Add redis script test method.
-3. [ ] Fix code comments.
-4. [ ] Improve or remove useless code
-5. [ ] Check code formatting
+1. [X] Add test cases using "testify".
+2. [X] Add redis script test method.
+3. [ ] script_test unit test.
+4. [ ] Improve or remove useless code.
+5. [ ] Check code formatting.
