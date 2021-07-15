@@ -71,6 +71,15 @@ func main() {
 }
 ```
 
+----------
+
+### Dependency
+
+- testify - github.com/stretchr/testify
+- go-redis - github.com/go-redis/redis/v8
+- miniredis - github.com/alicebob/miniredis/v2
+
+
 ## TODO
 
 1. [ ] Add test cases using "testify".
