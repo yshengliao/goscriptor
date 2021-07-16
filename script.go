@@ -111,11 +111,11 @@ func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, clien
 		return errors.New("'client' can not be nil.")
 	}
 
-	// check if the script key exists
-	err := keyExistsLuaScript(ctx, client, redisScriptDefinition, db)
-	if err != nil {
-		return err
-	}
+	// // check if the script key exists
+	// err := keyExistsLuaScript(ctx, client, redisScriptDefinition, db)
+	// if err != nil {
+	// 	return err
+	// }
 
 	// Load the script
 	res, err := loadLuaScript(ctx, client, redisScriptDefinition, db)
@@ -126,7 +126,7 @@ func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, clien
 	if v, ok := res.([]interface{}); ok {
 		count := len(v)
 		if count == 0 {
-			return errors.New("redid is no script.")
+			return nil
 		}
 
 		// Parse the script name and sha1

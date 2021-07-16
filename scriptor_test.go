@@ -83,7 +83,23 @@ func goscriptor_TestCase(scriptor *goscriptor.Scriptor, assert *assert.Assertion
 
 	res, err = scriptor.ExecSha(hello+" not found", []string{""})
 	assert.NotNil(err)
-	assert.Equal("script not found", err.Error(), "they should be equal")
+	assert.Equal("script not found.", err.Error(), "they should be equal")
+}
+
+func goscriptor_TestCaseScriptNil(scriptor *goscriptor.Scriptor, assert *assert.Assertions) {
+	var res interface{}
+	var err error
+
+	res, err = scriptor.Exec("return 'Hello, World!'", []string{""})
+	assert.Nil(err)
+	assert.Equal("Hello, World!", res.(string), "they should be equal")
+
+	res, err = scriptor.Exec("error return 'Hello, World!'", []string{""})
+	assert.NotNil(err)
+
+	res, err = scriptor.ExecSha(hello, []string{""})
+	assert.NotNil(err)
+	assert.Equal("script not found.", err.Error(), "they should be equal")
 }
 
 func Test_goscriptor_NewDB(t *testing.T) {
@@ -99,13 +115,13 @@ func Test_goscriptor_NewDB(t *testing.T) {
 
 	// scripts does not exist
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// scripts is empty
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// register scripts
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, scripts)
@@ -132,13 +148,13 @@ func Test_goscriptor_NewDB(t *testing.T) {
 
 	// scripts does not exist
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// scripts is empty
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// can re-register scripts
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, scripts)
@@ -160,13 +176,13 @@ func Test_goscriptor_New(t *testing.T) {
 
 	// scripts does not exist
 	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, nil, assert)
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// scripts is empty
 	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, map[string]string{}, assert)
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// register scripts
 	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, scripts, assert)
@@ -193,13 +209,13 @@ func Test_goscriptor_New(t *testing.T) {
 
 	// scripts does not exist
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// scripts is empty
 	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.NotNil(err)
-	assert.Equal("Script key does not exist.", err.Error(), "they should be equal")
+	assert.Nil(err)
+	goscriptor_TestCaseScriptNil(scriptor, assert)
 
 	// can re-register scripts
 	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, scripts, assert)

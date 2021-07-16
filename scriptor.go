@@ -115,8 +115,8 @@ func (s *Scriptor) Exec(script string, keys []string, args ...interface{}) (inte
 
 // ExecSha - execute the script
 func (s *Scriptor) ExecSha(scriptname string, keys []string, args ...interface{}) (interface{}, error) {
-	if s.scripts[scriptname] == "" {
-		return nil, errors.New("script not found")
+	if s.scripts[scriptname] == "" || s.scripts == nil || len(s.scripts) == 0 {
+		return nil, errors.New("script not found.")
 	}
 	return s.Client.EvalSha(s.CTX, s.scripts[scriptname], keys, args...).Result()
 }
