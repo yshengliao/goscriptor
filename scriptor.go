@@ -29,7 +29,7 @@ func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition strin
 	if client == nil {
 		return nil, errors.New("'client' cannot be nil")
 	}
-	
+
 	// new scriptor
 	s := &Scriptor{}
 	s.sRedisClientSyncOnce.Do(func() {
@@ -47,11 +47,11 @@ func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition strin
 
 	s.CTX = context.Background()
 
-	// // ping the redis server
-	// _, err := s.Client.
-	// if err != nil {
-	// 	return nil, err
-	// }
+	// ping the redis server
+	_, err := s.Client.Ping(s.CTX).Result()
+	if err != nil {
+		return nil, err
+	}
 
 	// load all scripts or register scripts
 	scriptDescriptor, err := NewScriptDescriptor(s.CTX, s.Client, scripts, s.redisScriptDefinition, s.redisScriptDB)
