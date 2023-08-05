@@ -16,7 +16,7 @@ var (
 
 // Scriptor - the script manager
 type Scriptor struct {
-	Client                *redis.Client
+	Client                redis.UniversalClient
 	sRedisClientSyncOnce  sync.Once
 	scripts               map[string]string
 	redisScriptDB         int
@@ -25,11 +25,11 @@ type Scriptor struct {
 }
 
 // New - create a new scriptor with the redis client
-func New(client *redis.Client, scriptDB int, redisScriptDefinition string, scripts *map[string]string) (*Scriptor, error) {
+func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition string, scripts *map[string]string) (*Scriptor, error) {
 	if client == nil {
 		return nil, errors.New("'client' cannot be nil")
 	}
-
+	
 	// new scriptor
 	s := &Scriptor{}
 	s.sRedisClientSyncOnce.Do(func() {
@@ -47,11 +47,11 @@ func New(client *redis.Client, scriptDB int, redisScriptDefinition string, scrip
 
 	s.CTX = context.Background()
 
-	// ping the redis server
-	_, err := s.Client.Ping(s.CTX).Result()
-	if err != nil {
-		return nil, err
-	}
+	// // ping the redis server
+	// _, err := s.Client.
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// load all scripts or register scripts
 	scriptDescriptor, err := NewScriptDescriptor(s.CTX, s.Client, scripts, s.redisScriptDefinition, s.redisScriptDB)

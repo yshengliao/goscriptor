@@ -1,1 +1,13 @@
-.vscode/settings.json
+.DS_Store
+.vscode
+.env
+
+.VERSION
+
+# local environment shell script
+env.bat
+env.sh
+env.*.bat
+env.*.sh
+
+.conf

@@ -43,7 +43,7 @@ type ScriptDescriptor struct {
 }
 
 // NewScriptDescriptor creates a new script descriptor
-func NewScriptDescriptor(ctx context.Context, client *redis.Client, scripts *map[string]string, redisScriptDefinition string, db int) (*ScriptDescriptor, error) {
+func NewScriptDescriptor(ctx context.Context, client redis.UniversalClient, scripts *map[string]string, redisScriptDefinition string, db int) (*ScriptDescriptor, error) {
 	if client == nil {
 		return nil, errors.New("'client' is invalid")
 	}
@@ -71,7 +71,7 @@ func NewScriptDescriptor(ctx context.Context, client *redis.Client, scripts *map
 }
 
 // Registers a script
-func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client *redis.Client, scripts *map[string]string, redisScriptDefinition string, db int) error {
+func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client redis.UniversalClient, scripts *map[string]string, redisScriptDefinition string, db int) error {
 	scriptDescriptor.contrainer = make(map[string]string)
 
 	// Registers a script
@@ -106,7 +106,7 @@ func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client *
 }
 
 // LoadScripts loads the scripts
-func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int) error {
+func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, db int) error {
 	if client == nil {
 		return errors.New("'client' can not be nil.")
 	}
@@ -146,7 +146,7 @@ func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, clien
 }
 
 // keyExistsLuaScript - check if the script key exists
-func keyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int) error {
+func keyExistsLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, db int) error {
 	// check if the script key exists
 	exists, err := client.Eval(ctx, existsLuaScriptTemplate, []string{redisScriptDefinition}, db).Result()
 	if err != nil {
@@ -160,7 +160,7 @@ func keyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptDe
 }
 
 // mkeyExistsLuaScript - check if the script member key exists
-func mkeyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, mkey string, db int) error {
+func mkeyExistsLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, mkey string, db int) error {
 	// check if the script member key exists
 	exists, err := client.Eval(ctx, hexistsLuaScriptTemplate, []string{redisScriptDefinition, mkey}, db).Result()
 	if err != nil {
@@ -174,7 +174,7 @@ func mkeyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptD
 }
 
 // getLuaScript - get the lua script sha1
-func getLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, name string, db int) (string, error) {
+func getLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, name string, db int) (string, error) {
 
 	exists, err := client.Eval(ctx, getLuaScriptTemplate, []string{redisScriptDefinition}, db, name).Result()
 	if err != nil {
@@ -188,7 +188,7 @@ func getLuaScript(ctx context.Context, client *redis.Client, redisScriptDefiniti
 }
 
 // setLuaScript - set the lua script sha1
-func setLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, name string, sha1 string, db int) error {
+func setLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, name string, sha1 string, db int) error {
 	_, err := client.Eval(ctx, setLuaScriptTemplate, []string{redisScriptDefinition}, db, name, sha1).Result()
 	if err != nil {
 		return err
@@ -198,13 +198,13 @@ func setLuaScript(ctx context.Context, client *redis.Client, redisScriptDefiniti
 }
 
 // loadLuaScript - Load the script
-func loadLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int) (interface{}, error) {
+func loadLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, db int) (interface{}, error) {
 	res, err := client.Eval(ctx, loadLuaScriptTemplate, []string{redisScriptDefinition}, db).Result()
 	return res, err
 }
 
 // scriptExists - checking the existence of the scripts in the script cache.
-func scriptExists(ctx context.Context, client *redis.Client, sha1 string) error {
+func scriptExists(ctx context.Context, client redis.UniversalClient, sha1 string) error {
 	exists, err := client.ScriptExists(ctx, sha1).Result()
 	if err != nil {
 		return err
@@ -216,7 +216,7 @@ func scriptExists(ctx context.Context, client *redis.Client, sha1 string) error 
 }
 
 // availableLuaScript - check if the script is available
-func availableLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int, name string) (string, error) {
+func availableLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, db int, name string) (string, error) {
 	var err error
 	var sha1 string
 	// check if the script key & mkey is exists
