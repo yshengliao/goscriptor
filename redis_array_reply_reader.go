@@ -6,22 +6,22 @@ import (
 	null "gopkg.in/guregu/null.v3"
 )
 
-// EmptyRedisReplyValue -
+// EmptyRedisReplyValue represents a nil Redis reply value.
 var EmptyRedisReplyValue = &RedisReplyValue{value: nil}
 
-// RedisReplyValue -
+// RedisReplyValue wraps a value returned from Redis.
 type RedisReplyValue struct {
 	value interface{}
 }
 
-// NewRedisReplyValue -
+// NewRedisReplyValue creates a RedisReplyValue instance.
 func NewRedisReplyValue(value interface{}) *RedisReplyValue {
 	return &RedisReplyValue{
 		value: value,
 	}
 }
 
-// Value -
+// Value returns the underlying value.
 func (v *RedisReplyValue) Value() interface{} {
 	return v.value
 }
@@ -116,12 +116,13 @@ func (v *RedisReplyValue) AsString() string {
 	return ""
 }
 
-// IsNil -
+// IsNil returns true when the underlying value is nil.
 func (v *RedisReplyValue) IsNil() bool {
 	return v.value == nil
 }
 
-// ToArrayReplyReader -
+// ToArrayReplyReader converts the value to a RedisArrayReplyReader
+// when it contains a slice of interfaces.
 func (v *RedisReplyValue) ToArrayReplyReader() *RedisArrayReplyReader {
 	i, ok := v.value.([]interface{})
 	if ok {

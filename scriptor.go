@@ -121,7 +121,7 @@ func (s *Scriptor) ExecSha(scriptname string, keys []string, args ...interface{}
 	return s.Client.EvalSha(s.CTX, s.scripts[scriptname], keys, args...).Result()
 }
 
-// stop - stop the scriptor
+// stop closes the underlying Redis client.
 func (s *Scriptor) stop() {
 	s.Client.Close()
 }
