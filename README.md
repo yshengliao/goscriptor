@@ -99,6 +99,14 @@ func main() {
   go get gopkg.in/guregu/null.v3
   ```
 
+## Contributing
+
+Before opening a pull request:
+
+- Run `go test ./...` to ensure all tests pass.
+- Format Go files with `gofmt -w`.
+- Provide a clear summary of your changes in the PR description.
+
 ## TODO
 
 1. [X] Add test cases using "testify".
