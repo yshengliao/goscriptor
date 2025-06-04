@@ -8,7 +8,7 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-// redis script defination
+// redis script definition
 // the hash key definition that is used to store the script
 var (
 	scriptDefinition = "scriptor_v.0.0.0"
@@ -58,7 +58,7 @@ func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition strin
 	if err != nil {
 		return nil, err
 	}
-	s.scripts = scriptDescriptor.contrainer
+	s.scripts = scriptDescriptor.container
 
 	return s, nil
 }
@@ -97,7 +97,7 @@ func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts *map
 	if err != nil {
 		return nil, err
 	}
-	s.scripts = scriptDescriptor.contrainer
+	s.scripts = scriptDescriptor.container
 
 	return s, nil
 }

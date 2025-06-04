@@ -1,6 +1,6 @@
 # goscriptor
 
-Packet GoScriptor implements a way to use redis script more easily
+Package GoScriptor implements a way to use redis script more easily
 
 ## Install
 

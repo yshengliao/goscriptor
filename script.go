@@ -38,8 +38,8 @@ var (
 
 // Script is a script descriptor
 type ScriptDescriptor struct {
-	contrainer map[string]string
-	Scripts    map[string]string
+	container map[string]string
+	Scripts   map[string]string
 }
 
 // NewScriptDescriptor creates a new script descriptor
@@ -52,7 +52,7 @@ func NewScriptDescriptor(ctx context.Context, client redis.UniversalClient, scri
 	scriptDescriptor := &ScriptDescriptor{}
 
 	if scripts == nil || len(*scripts) == 0 {
-		// Lodad the lua script sha1
+		// Load the lua script sha1
 		err := scriptDescriptor.LoadScripts(ctx, client, redisScriptDefinition, db)
 		if err != nil {
 			return nil, err
@@ -72,7 +72,7 @@ func NewScriptDescriptor(ctx context.Context, client redis.UniversalClient, scri
 
 // Registers a script
 func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client redis.UniversalClient, scripts *map[string]string, redisScriptDefinition string, db int) error {
-	scriptDescriptor.contrainer = make(map[string]string)
+	scriptDescriptor.container = make(map[string]string)
 
 	// Registers a script
 	for name, body := range *scripts {
@@ -84,7 +84,7 @@ func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client r
 		// countinue the script
 		sha1, err = availableLuaScript(ctx, client, redisScriptDefinition, db, name)
 		if err == nil {
-			scriptDescriptor.contrainer[name] = sha1
+			scriptDescriptor.container[name] = sha1
 			continue
 		}
 
@@ -99,7 +99,7 @@ func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client r
 			return err
 		}
 
-		scriptDescriptor.contrainer[name] = sha1
+		scriptDescriptor.container[name] = sha1
 	}
 
 	return nil
@@ -131,7 +131,7 @@ func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, clien
 
 		// Parse the script name and sha1
 		// checking the existence of the scripts in the script cache.
-		scriptDescriptor.contrainer = make(map[string]string)
+		scriptDescriptor.container = make(map[string]string)
 		for i := 0; i < count; i = i + 2 {
 			key, value := v[i], v[i+1]
 
@@ -139,7 +139,7 @@ func (scriptDescriptor *ScriptDescriptor) LoadScripts(ctx context.Context, clien
 			if err != nil {
 				return err
 			}
-			scriptDescriptor.contrainer[key.(string)] = value.(string)
+			scriptDescriptor.container[key.(string)] = value.(string)
 		}
 	}
 	return nil
