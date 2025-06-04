@@ -1,3 +1,3 @@
 // Package doc is a generated GoDoc package.
-// Package goscriptor implements a way to use redis script more easily
+// Package goscriptor provides helpers for working with Redis scripts.
 package goscriptor

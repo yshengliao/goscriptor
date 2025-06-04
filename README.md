@@ -1,11 +1,11 @@
 # goscriptor
 
-Package GoScriptor implements a way to use redis script more easily
+Package goscriptor simplifies working with Redis scripts in Go.
 
 ## Install
 
 ```console
-go get -u -v github.com/yshengliao/goscriptor
+go get github.com/yshengliao/goscriptor
 ```
 
 ## Usage
@@ -78,25 +78,25 @@ func main() {
 - testify
 
   ```console
-    go get -u -v github.com/stretchr/testify
+  go get github.com/stretchr/testify
   ```
 
 - go-redis  
 
   ```console
-    go get -u -v github.com/go-redis/redis/v8
+  go get github.com/go-redis/redis/v8
   ```
 
 - miniredis
 
   ```console
-    go get -u -v github.com/alicebob/miniredis/v2
+  go get github.com/alicebob/miniredis/v2
   ```
 
 - null.v3  
 
   ```console
-    go get -u -v gopkg.in/guregu/null.v3
+  go get gopkg.in/guregu/null.v3
   ```
 
 ## TODO

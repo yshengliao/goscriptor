@@ -7,8 +7,7 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-// Load the lua script sha
-// Store the SHA1 and script name in redis
+// Lua script templates used to store and retrieve script SHA1 hashes in Redis.
 var (
 	loadLuaScriptTemplate = `
 		redis.pcall('SELECT', ARGV[1])
@@ -79,9 +78,8 @@ func (scriptDescriptor *ScriptDescriptor) Register(ctx context.Context, client r
 		var err error
 		var sha1 string
 
-		// if the script key & mkey is exists
-		// get the script sha1 and ScriptExists the sha1
-		// countinue the script
+		// If the script key and member key exist,
+		// retrieve the SHA1 and verify the script before continuing.
 		sha1, err = availableLuaScript(ctx, client, redisScriptDefinition, db, name)
 		if err == nil {
 			scriptDescriptor.container[name] = sha1
@@ -181,7 +179,7 @@ func getLuaScript(ctx context.Context, client redis.UniversalClient, redisScript
 		return "", err
 	}
 	if exists.(string) == "" {
-		return "", errors.New("Script is not already")
+		return "", errors.New("script not found")
 	}
 
 	return exists.(string), nil
@@ -210,7 +208,7 @@ func scriptExists(ctx context.Context, client redis.UniversalClient, sha1 string
 		return err
 	}
 	if !exists[0] {
-		return errors.New("script is not exists. please reload your script")
+		return errors.New("script does not exist; please reload your script")
 	}
 	return nil
 }
@@ -219,8 +217,8 @@ func scriptExists(ctx context.Context, client redis.UniversalClient, sha1 string
 func availableLuaScript(ctx context.Context, client redis.UniversalClient, redisScriptDefinition string, db int, name string) (string, error) {
 	var err error
 	var sha1 string
-	// check if the script key & mkey is exists
-	// get the script sha1
+	// Check that the script key and member key exist
+	// and retrieve the script SHA1.
 	err = keyExistsLuaScript(ctx, client, redisScriptDefinition, db)
 	if err != nil {
 		return "", err
