@@ -26,12 +26,12 @@ func (opt *Option) Create() redis.UniversalClient {
 	})
 }
 
-// UniversalOprions - Redis Option
-type UniversalOprions redis.UniversalOptions
+// UniversalOptions - Redis Option
+type UniversalOptions redis.UniversalOptions
 
 // CreateAddrs - create a new redis descriptor
 //
 //	https://redis.uptrace.dev/guide/universal.html
-func (opt *UniversalOprions) CreateAddrs() redis.UniversalClient {
+func (opt *UniversalOptions) CreateAddrs() redis.UniversalClient {
 	return redis.NewUniversalClient((*redis.UniversalOptions)(opt))
 }
