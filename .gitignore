@@ -12,3 +12,5 @@ env.*.sh
 
 .conf
 app
+*.test
+cover.out

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yshengliao/goscriptor"
 )
@@ -19,14 +20,17 @@ type MyScriptor struct {
 	Scriptor *goscriptor.Scriptor
 }
 
-// hello function
+// hello executes the cached hello script.
 func (s *MyScriptor) hello(ctx context.Context) (string, error) {
 	res, err := s.Scriptor.ExecSha(ctx, hello, []string{})
 	if err != nil {
 		return "", err
 	}
-
-	return res.(string), nil
+	str, ok := res.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected type %T", res)
+	}
+	return str, nil
 }
 
 func main() {
@@ -46,6 +50,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer scriptor.Close()
 
 	myscript := &MyScriptor{
 		Scriptor: scriptor,

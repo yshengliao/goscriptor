@@ -262,8 +262,8 @@ func (c *Client) getConn(ctx context.Context) (*conn, error) {
 	}
 
 	// Can we create a new connection?
-	if int(atomic.LoadInt32(&c.active)) < c.opts.poolSize() {
-		atomic.AddInt32(&c.active, 1)
+	if int(c.active) < c.opts.poolSize() {
+		c.active++
 		c.mu.Unlock()
 		cn, err := c.dialConn(ctx)
 		if err != nil {
@@ -280,6 +280,9 @@ func (c *Client) getConn(ctx context.Context) (*conn, error) {
 
 	select {
 	case cn := <-ch:
+		if cn == nil {
+			return nil, fmt.Errorf("redis: client is closed")
+		}
 		cn.usedAt = time.Now()
 		return cn, nil
 	case <-ctx.Done():
@@ -496,11 +499,5 @@ func (c *Client) ScriptExists(ctx context.Context, sha string) (bool, error) {
 // FlushAll flushes all keys from all databases.
 func (c *Client) FlushAll(ctx context.Context) error {
 	_, err := c.Do(ctx, "FLUSHALL")
-	return err
-}
-
-// HSet sets a hash field.
-func (c *Client) HSet(ctx context.Context, key, field, value string) error {
-	_, err := c.Do(ctx, "HSET", key, field, value)
 	return err
 }

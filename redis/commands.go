@@ -129,6 +129,12 @@ func (c *Client) TTL(ctx context.Context, key string) (int64, error) {
 
 // --- Hash commands ---
 
+// HSet sets a hash field.
+func (c *Client) HSet(ctx context.Context, key, field, value string) error {
+	_, err := c.Do(ctx, "HSET", key, field, value)
+	return err
+}
+
 // HGet returns the value of field in hash key.
 func (c *Client) HGet(ctx context.Context, key, field string) (string, error) {
 	reply, err := c.Do(ctx, "HGET", key, field)

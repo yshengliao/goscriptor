@@ -101,8 +101,8 @@ func assertTestCase(t *testing.T, scriptor *goscriptor.Scriptor) {
 	if err == nil {
 		t.Fatal("expected error for missing script")
 	}
-	if err.Error() != "goscriptor: script not found" {
-		t.Fatalf("expected 'goscriptor: script not found', got %q", err.Error())
+	if !errors.Is(err, goscriptor.ErrScriptNotFound) {
+		t.Fatalf("expected ErrScriptNotFound, got %v", err)
 	}
 }
 
@@ -127,8 +127,8 @@ func assertTestCaseScriptNil(t *testing.T, scriptor *goscriptor.Scriptor) {
 	if err == nil {
 		t.Fatal("expected error for nil scripts")
 	}
-	if err.Error() != "goscriptor: script not found" {
-		t.Fatalf("expected 'goscriptor: script not found', got %q", err.Error())
+	if !errors.Is(err, goscriptor.ErrScriptNotFound) {
+		t.Fatalf("expected ErrScriptNotFound, got %v", err)
 	}
 }
 

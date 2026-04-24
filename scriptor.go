@@ -17,11 +17,7 @@ import (
 	"github.com/yshengliao/goscriptor/redis"
 )
 
-// redis script definition
-// the hash key definition that is used to store the script
-var (
-	scriptDefinition = "scriptor_v.0.0.0"
-)
+const scriptDefinition = "scriptor_v.0.0.0"
 
 // Scriptor manages Redis Lua scripts.
 type Scriptor struct {

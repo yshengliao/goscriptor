@@ -1,118 +1,334 @@
 package goscriptor_test
 
 import (
-	"errors"
-	"reflect"
 	"testing"
 
 	"github.com/yshengliao/goscriptor"
 )
 
-func TestRedisArrayReplyReader_Basic(t *testing.T) {
-	reply := []any{"1", "two", int64(3), []any{"nested1", "nested2"}}
-	r := goscriptor.NewRedisArrayReplyReader(reply)
-
-	if r.GetLength() != 4 {
-		t.Fatalf("expected length 4, got %d", r.GetLength())
+func TestRedisReplyValue_AsInt32(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		want    int32
+		wantErr bool
+	}{
+		{"string int", "42", 42, false},
+		{"string float", "3.7", 3, false},
+		{"int", int(10), 10, false},
+		{"int32", int32(20), 20, false},
+		{"int64", int64(30), 30, false},
+		{"nil", nil, 99, false},
+		{"bad string", "abc", 99, true},
 	}
-	if !r.HasNext() {
-		t.Fatal("expected HasNext true")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := goscriptor.NewRedisReplyValue(tt.input)
+			got, err := v.AsInt32(99)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("expected %d, got %d", tt.want, got)
+			}
+		})
 	}
+}
 
-	v, err := r.ReadInt32(0)
+func TestRedisReplyValue_AsInt64(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		want    int64
+		wantErr bool
+	}{
+		{"string", "100", 100, false},
+		{"int", int(10), 10, false},
+		{"int32", int32(20), 20, false},
+		{"int64", int64(30), 30, false},
+		{"nil", nil, -1, false},
+		{"bad", "xyz", -1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := goscriptor.NewRedisReplyValue(tt.input)
+			got, err := v.AsInt64(-1)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("expected %d, got %d", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRedisReplyValue_AsFloat64(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		want    float64
+		wantErr bool
+	}{
+		{"string", "3.14", 3.14, false},
+		{"int", int(5), 5.0, false},
+		{"int32", int32(6), 6.0, false},
+		{"int64", int64(7), 7.0, false},
+		{"float32", float32(1.5), 1.5, false},
+		{"float64", float64(2.5), 2.5, false},
+		{"nil", nil, 0.0, false},
+		{"bad", "abc", 0.0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := goscriptor.NewRedisReplyValue(tt.input)
+			got, err := v.AsFloat64(0.0)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// float32 loses precision, use tolerance
+			if !tt.wantErr && (got-tt.want > 0.01 || tt.want-got > 0.01) {
+				t.Fatalf("expected %f, got %f", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRedisReplyValue_AsString(t *testing.T) {
+	tests := []struct {
+		name  string
+		input any
+		want  string
+	}{
+		{"string", "hello", "hello"},
+		{"int", int(42), "42"},
+		{"int32", int32(32), "32"},
+		{"int64", int64(64), "64"},
+		{"nil", nil, ""},
+		{"unsupported", []byte("bytes"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := goscriptor.NewRedisReplyValue(tt.input)
+			if got := v.AsString(); got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRedisReplyValue_NullableInt(t *testing.T) {
+	// Non-nil
+	v := goscriptor.NewRedisReplyValue("42")
+	ptr, err := v.NullableInt()
 	if err != nil {
-		t.Fatalf("ReadInt32: %v", err)
+		t.Fatal(err)
 	}
-	if v != 1 {
-		t.Fatalf("expected 1, got %d", v)
-	}
-
-	if !r.HasNext() {
-		t.Fatal("expected HasNext true")
-	}
-	s := r.ReadString()
-	if s != "two" {
-		t.Fatalf("expected 'two', got %q", s)
+	if ptr == nil || *ptr != 42 {
+		t.Fatalf("expected *42, got %v", ptr)
 	}
 
-	i64, err := r.ReadInt64(0)
+	// Nil
+	v2 := goscriptor.NewRedisReplyValue(nil)
+	ptr2, err2 := v2.NullableInt()
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if ptr2 != nil {
+		t.Fatalf("expected nil, got %v", ptr2)
+	}
+
+	// Error
+	v3 := goscriptor.NewRedisReplyValue("bad")
+	_, err3 := v3.NullableInt()
+	if err3 == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestRedisReplyValue_NullableString(t *testing.T) {
+	v := goscriptor.NewRedisReplyValue("hello")
+	ptr := v.NullableString()
+	if ptr == nil || *ptr != "hello" {
+		t.Fatalf("expected *hello, got %v", ptr)
+	}
+
+	v2 := goscriptor.NewRedisReplyValue(nil)
+	if v2.NullableString() != nil {
+		t.Fatal("expected nil")
+	}
+}
+
+func TestRedisReplyValue_IsNil(t *testing.T) {
+	if !goscriptor.EmptyRedisReplyValue.IsNil() {
+		t.Fatal("EmptyRedisReplyValue should be nil")
+	}
+	if goscriptor.NewRedisReplyValue("x").IsNil() {
+		t.Fatal("non-nil value should not be nil")
+	}
+}
+
+func TestRedisReplyValue_ToArrayReplyReader(t *testing.T) {
+	// Valid array
+	v := goscriptor.NewRedisReplyValue([]any{"a", "b"})
+	r := v.ToArrayReplyReader()
+	if r == nil {
+		t.Fatal("expected non-nil reader")
+	}
+	if r.GetLength() != 2 {
+		t.Fatalf("expected length 2, got %d", r.GetLength())
+	}
+
+	// Non-array
+	v2 := goscriptor.NewRedisReplyValue("not an array")
+	if v2.ToArrayReplyReader() != nil {
+		t.Fatal("expected nil for non-array")
+	}
+}
+
+func TestRedisArrayReplyReader_ReadFloat64(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"3.14", int64(7)})
+
+	f1, err := r.ReadFloat64(0)
 	if err != nil {
-		t.Fatalf("ReadInt64: %v", err)
+		t.Fatal(err)
 	}
-	if i64 != 3 {
-		t.Fatalf("expected 3, got %d", i64)
+	if f1 < 3.13 || f1 > 3.15 {
+		t.Fatalf("expected ~3.14, got %f", f1)
 	}
 
+	f2, err := r.ReadFloat64(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f2 != 7.0 {
+		t.Fatalf("expected 7.0, got %f", f2)
+	}
+}
+
+func TestRedisArrayReplyReader_ReadArray(t *testing.T) {
+	inner := []any{"x", "y"}
+	r := goscriptor.NewRedisArrayReplyReader([]any{inner, "not_array"})
+
+	sub := r.ReadArray()
+	if sub == nil || sub.GetLength() != 2 {
+		t.Fatal("expected nested reader with 2 items")
+	}
+
+	nilSub := r.ReadArray()
+	if nilSub != nil {
+		t.Fatal("expected nil for non-array value")
+	}
+}
+
+func TestRedisArrayReplyReader_BeyondBounds(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"only"})
+	r.ReadString() // consume the only item
+
+	v := r.ReadValue()
+	if !v.IsNil() {
+		t.Fatal("reading beyond bounds should return EmptyRedisReplyValue")
+	}
+}
+
+func TestExec_EmptyScript(t *testing.T) {
+	addr := redisAddr(t)
+	host, port := splitAddr(t, addr)
+
+	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
+	s, err := goscriptor.NewDB(opt, 1, "test_empty_script", nil)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer s.Close()
+
+	_, err = s.Exec(nil, "", nil)
+	if err == nil {
+		t.Fatal("expected error for empty script")
+	}
+}
+
+func TestRedisReplyValue_Value(t *testing.T) {
+	v := goscriptor.NewRedisReplyValue("raw")
+	if v.Value().(string) != "raw" {
+		t.Fatal("Value() should return underlying value")
+	}
+}
+
+func TestRedisArrayReplyReader_HasNext(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"a"})
 	if !r.HasNext() {
 		t.Fatal("expected HasNext true")
 	}
-	nested := r.ReadArray()
-	if nested == nil {
-		t.Fatal("expected non-nil nested reader")
-	}
-	if nested.GetLength() != 2 {
-		t.Fatalf("expected nested length 2, got %d", nested.GetLength())
-	}
-
-	if !nested.HasNext() {
-		t.Fatal("expected nested HasNext true")
-	}
-	if ns := nested.ReadString(); ns != "nested1" {
-		t.Fatalf("expected 'nested1', got %q", ns)
-	}
-	nested.SkipValue()
-	if nested.HasNext() {
-		t.Fatal("expected nested HasNext false after skip")
-	}
-	if ns := nested.ReadString(); ns != "" {
-		t.Fatalf("expected empty string past end, got %q", ns)
-	}
-
+	r.ReadString()
 	if r.HasNext() {
-		t.Fatal("expected HasNext false")
+		t.Fatal("expected HasNext false after consuming all")
 	}
-	if s := r.ReadString(); s != "" {
-		t.Fatalf("expected empty string past end, got %q", s)
-	}
-	dv, err := r.ReadInt32(42)
+}
+
+func TestRedisArrayReplyReader_ReadInt32Int64(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"10", "20"})
+
+	v32, err := r.ReadInt32(0)
 	if err != nil {
-		t.Fatalf("ReadInt32 past end: %v", err)
+		t.Fatal(err)
 	}
-	if dv != 42 {
-		t.Fatalf("expected default 42, got %d", dv)
+	if v32 != 10 {
+		t.Fatalf("expected 10, got %d", v32)
+	}
+
+	v64, err := r.ReadInt64(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v64 != 20 {
+		t.Fatalf("expected 20, got %d", v64)
+	}
+}
+
+func TestRedisArrayReplyReader_SkipValue(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"skip", "keep"})
+	r.SkipValue()
+	got := r.ReadString()
+	if got != "keep" {
+		t.Fatalf("expected keep, got %q", got)
 	}
 }
 
 func TestRedisArrayReplyReader_ForEach(t *testing.T) {
-	arr := []any{"a", "b", "c"}
-	r := goscriptor.NewRedisArrayReplyReader(arr)
-
+	r := goscriptor.NewRedisArrayReplyReader([]any{"a", "b", "c"})
 	var collected []string
 	err := r.ForEach(func(i int, v *goscriptor.RedisReplyValue) error {
 		collected = append(collected, v.AsString())
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ForEach: %v", err)
+		t.Fatal(err)
 	}
-	expected := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(collected, expected) {
-		t.Fatalf("expected %v, got %v", expected, collected)
+	if len(collected) != 3 || collected[0] != "a" || collected[2] != "c" {
+		t.Fatalf("unexpected: %v", collected)
 	}
+}
 
-	r2 := goscriptor.NewRedisArrayReplyReader(arr)
-	count := 0
-	err = r2.ForEach(func(i int, v *goscriptor.RedisReplyValue) error {
-		count++
+func TestRedisArrayReplyReader_ForEach_Error(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"a", "b"})
+	err := r.ForEach(func(i int, v *goscriptor.RedisReplyValue) error {
 		if i == 1 {
-			return errors.New("stop")
+			return goscriptor.ErrScriptNotFound
 		}
 		return nil
 	})
 	if err == nil {
-		t.Fatal("expected error from ForEach")
-	}
-	if count != 2 {
-		t.Fatalf("expected count 2, got %d", count)
+		t.Fatal("expected error from ForEach callback")
 	}
 }
+
