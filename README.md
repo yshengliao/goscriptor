@@ -182,3 +182,31 @@ REDIS_ADDR=127.0.0.1:6379 go test -v ./...
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+
+---
+
+## Testing & Performance
+
+This project relies on real Redis for integration tests to ensure RESP2 correctness and connection pool reliability. The underlying custom client has been rigorously optimized for zero-allocation command formatting and bulk string parsing.
+
+Run the tests and benchmarks locally (requires a running Redis instance at `127.0.0.1:6379`):
+
+```bash
+$ REDIS_ADDR=127.0.0.1:6379 go test -bench=. -benchmem ./...
+```
+
+**Benchmark Results (Apple M3 Pro):**
+
+```text
+goos: darwin
+goarch: arm64
+pkg: github.com/yshengliao/goscriptor
+cpu: Apple M3 Pro
+BenchmarkPing-12           13921             85492 ns/op              20 B/op          2 allocs/op
+BenchmarkGet-12            14032             84385 ns/op              96 B/op          4 allocs/op
+PASS
+ok      github.com/yshengliao/goscriptor        4.150s
+```
+
+*   **Zero-Allocation formatting**: Writing RESP2 commands leverages `sync.Pool`, eliminating dynamic memory allocation during normal request lifecycles.
+*   **Minimal Parsing Allocation**: `ReadReply` uses `bufio.Reader.ReadLine()` and custom byte parsing instead of strings, bringing `PING` down to just `2 allocs/op` (20 Bytes/op).

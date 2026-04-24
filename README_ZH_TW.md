@@ -182,3 +182,31 @@ REDIS_ADDR=127.0.0.1:6379 go test -v ./...
 ## 授權
 
 MIT License — 見 [LICENSE](LICENSE)。
+
+---
+
+## 測試與效能 (Testing & Performance)
+
+本專案依賴真實的 Redis 進行整合測試，以確保 RESP2 協議的正確性與連線池的穩定性。底層自建的 Client 已針對 Zero-allocation 與字串解析進行極限優化。
+
+請在本地執行測試與效能基準測試（需要一個執行於 `127.0.0.1:6379` 的 Redis 實例）：
+
+```bash
+$ REDIS_ADDR=127.0.0.1:6379 go test -bench=. -benchmem ./...
+```
+
+**基準測試結果 (Apple M3 Pro):**
+
+```text
+goos: darwin
+goarch: arm64
+pkg: github.com/yshengliao/goscriptor
+cpu: Apple M3 Pro
+BenchmarkPing-12           13921             85492 ns/op              20 B/op          2 allocs/op
+BenchmarkGet-12            14032             84385 ns/op              96 B/op          4 allocs/op
+PASS
+ok      github.com/yshengliao/goscriptor        4.150s
+```
+
+*   **零分配指令構造 (Zero-Allocation formatting)**：寫入 RESP2 指令時利用了 `sync.Pool`，在正常的請求週期內消除了動態記憶體分配。
+*   **極低解析分配 (Minimal Parsing Allocation)**：`ReadReply` 改用 `bufio.Reader.ReadLine()` 搭配自訂的 `[]byte` 整數解析，避免了多餘的字串轉換，將 `PING` 操作降至極低的 `2 allocs/op` (20 Bytes/op)。
