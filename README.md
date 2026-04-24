@@ -1,116 +1,184 @@
-# goscriptor
+# Goscriptor — Zero-Dependency Redis Script Manager for Go
 
-Package goscriptor simplifies working with Redis scripts in Go.
+[![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://go.dev/)
+![Status](https://img.shields.io/badge/status-v0.5.1--alpha-orange.svg)
+[![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
+![AI Generated](https://img.shields.io/badge/AI_Generated-Antigravity-blueviolet.svg)
 
-## Install
+> A lightweight Go library for managing Redis Lua scripts with atomic execution, SHA1 caching, and a built-in zero-dependency Redis client.
+>
+> [繁體中文](README_ZH_TW.md)
 
-```console
+## Features
+
+- **Zero external dependencies** — built-in RESP2 client, no `go-redis` required
+- **Lua script lifecycle** — register, cache (SHA1), and execute atomically
+- **Production-grade connection pool** — max connections, idle timeout, connection age, waiter queue
+- **Standalone Redis client** — usable independently via `goscriptor/redis` sub-package
+- **20+ built-in commands** — String, Hash, List, Set, Key operations
+
+> **Note:** This library uses `SELECT` internally for DB isolation. **Redis Cluster is not supported.**
+
+## Quick Start
+
+```bash
 go get github.com/yshengliao/goscriptor
 ```
 
-## Usage
-
-Let's start with a trivial example:
+### Lua Script Management
 
 ```go
 package main
 
 import (
+    "context"
+    "fmt"
+
     "github.com/yshengliao/goscriptor"
 )
 
-var (
-    scriptDefinition = "scriptKey|0.0.0"
-
-    hello               = "hello"
-    _HelloworldTemplate = `
-    return 'Hello, World!'
-    `
-)
-
-type MyScriptor struct {
-    Scriptor *goscriptor.Scriptor
-}
-
-// hello function
-func (s *MyScriptor) hello() (string, error) {
-    res, err := s.Scriptor.ExecSha(hello, []string{})
-    if err != nil {
-        return "", err
-    }
-
-    return res.(string), nil
-}
-
 func main() {
     opt := &goscriptor.Option{
-        Host:     "127.0.0.1",
-        Port:     6379,
-        Password: "",
-        DB:       0,
-        PoolSize: 10,
+        Host: "127.0.0.1", Port: 6379,
+        DB: 0, PoolSize: 10,
     }
 
     scripts := map[string]string{
-        hello: _HelloworldTemplate,
+        "hello": `return 'Hello, World!'`,
     }
 
-    scriptor, err := goscriptor.NewDB(opt, 1, scriptDefinition, &scripts)
+    s, err := goscriptor.NewDB(opt, 1, "myapp|v1.0", scripts)
     if err != nil {
         panic(err)
     }
+    defer s.Close()
 
-    myscript := &MyScriptor{
-        Scriptor: scriptor,
-    }
-    res, err := myscript.hello()
-    if err != nil {
-        panic(err)
-    }
-    println(res)
+    ctx := context.Background()
+    res, _ := s.ExecSha(ctx, "hello", []string{})
+    fmt.Println(res) // Hello, World!
 }
 ```
 
-----------
+### Standalone Redis Client
 
-### Dependency
+```go
+package main
 
-- testify
+import (
+    "context"
+    "fmt"
+    "time"
 
-  ```console
-  go get github.com/stretchr/testify
-  ```
+    "github.com/yshengliao/goscriptor/redis"
+)
 
-- go-redis  
+func main() {
+    c := redis.NewClient(&redis.Options{
+        Addr:     "127.0.0.1:6379",
+        PoolSize: 10,
+    })
+    defer c.Close()
 
-  ```console
-  go get github.com/go-redis/redis/v8
-  ```
+    ctx := context.Background()
 
-- miniredis
+    c.Set(ctx, "name", "goscriptor", 5*time.Minute)
+    val, _ := c.Get(ctx, "name")
+    fmt.Println(val) // goscriptor
 
-  ```console
-  go get github.com/alicebob/miniredis/v2
-  ```
+    c.LPush(ctx, "queue", "task1", "task2")
+    item, _ := c.RPop(ctx, "queue")
+    fmt.Println(item) // task1
+}
+```
 
-- null.v3  
+## Architecture
 
-  ```console
-  go get gopkg.in/guregu/null.v3
-  ```
+```
+goscriptor/
+├── scriptor.go      Scriptor — main API (Exec, ExecSha)
+├── script.go        ScriptDescriptor — register, cache, load
+├── option.go        Option — convenience constructor
+├── reply.go         RedisArrayReplyReader — type-safe reply parsing
+├── errors.go        Sentinel errors
+├── redis/           Standalone Redis client (public sub-package)
+│   ├── client.go    Client, connection pool, pool stats
+│   ├── resp.go      RESP2 protocol encoder/decoder
+│   └── commands.go  20+ built-in Redis commands
+└── example/
+    └── main.go      Usage example
+```
 
-## Contributing
+## Connection Pool
 
-Before opening a pull request:
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `PoolSize` | 10 | Maximum active connections |
+| `MinIdle` | 1 | Minimum idle connections kept alive |
+| `IdleTimeout` | 5m | Idle connections closed after this duration |
+| `MaxConnAge` | 30m | Connections retired after this lifetime |
+| `ReadTimeout` | 3s | Per-command read deadline |
+| `WriteTimeout` | 3s | Per-command write deadline |
+| `DialTimeout` | 5s | Timeout for new TCP connections |
 
-- Run `go test ./...` to ensure all tests pass.
-- Format Go files with `gofmt -w`.
-- Provide a clear summary of your changes in the PR description.
+Set any timeout to `-1` to disable it.
 
-## TODO
+```go
+stats := client.PoolStats()
+fmt.Printf("Active: %d, Idle: %d, Waiters: %d\n",
+    stats.Active, stats.Idle, stats.Waiters)
+```
 
-1. [X] Add test cases using "testify".
-2. [X] Add redis script test method.
-3. [X] script_test unit test.
-4. [ ] Improve or remove unused code (ongoing cleanup).
-5. [X] Check code formatting.
+## Available Commands
+
+| Category | Commands |
+|----------|----------|
+| **String** | `Get`, `Set` (with TTL), `Del`, `Exists`, `Incr`, `IncrBy` |
+| **Hash** | `HGet`, `HGetAll`, `HSet`, `HDel`, `HExists` |
+| **List** | `LPush`, `RPush`, `LPop`, `RPop`, `LLen`, `LRange` |
+| **Set** | `SAdd`, `SMembers`, `SRem`, `SIsMember`, `SCard` |
+| **Key** | `Expire`, `TTL` |
+| **Script** | `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` |
+| **Server** | `Ping`, `FlushAll`, `Do` (raw command) |
+
+## Testing
+
+```bash
+# Unit tests (no Redis required)
+go test ./...
+
+# Integration tests (requires running Redis)
+REDIS_ADDR=127.0.0.1:6379 go test -v ./...
+```
+
+## Documentation
+
+- 📖 **[English Documentation](docs/en/)** — API reference, connection pool guide
+- 📖 **[繁體中文文件](docs/zh-tw/)** — API 參考、連線池指南
+
+## Changelog
+
+### v0.5.1-alpha (2026-04-24)
+
+- Replaced `go-redis/v9` with built-in RESP2 client — **zero external dependencies**.
+- Production-grade connection pool (max active, idle timeout, max age, waiter queue, background reaper).
+- Public `redis/` sub-package with 20+ built-in commands (String, Hash, List, Set, Key).
+- `PoolStats()` for runtime monitoring (Active / Idle / Waiters).
+- Reorganised project: `internal/redis/` → public `redis/`, `main/` → `example/`, file renames.
+- Bilingual documentation (`docs/en/`, `docs/zh-tw/`) with API reference, connection pool guide, migration guide.
+- Removed dead code (`ScriptDescriptor.Scripts` field), added HGETALL odd-count guard.
+- Fixed type-switch double assertions in `RedisReplyValue`.
+- Cleaned LLM artefacts (`doc.go`, stale README, code-review.md).
+
+### v0.4.0-alpha (2026-04-24)
+
+- Migrated to Go 1.25, `go-redis/v9`.
+- Removed `gopkg.in/guregu/null.v3` — replaced with native pointer types.
+- Removed `testify`, `miniredis` — all tests use stdlib `testing` + real Redis.
+- Introduced sentinel errors, explicit `context.Context` passing, comma-ok assertions.
+- Removed `sync.Once`, map pointer passing, `UniversalClient`.
+- Black-box tests (`package goscriptor_test`), `REDIS_ADDR` env-var gating.
+
+## License
+
+MIT License — see [LICENSE](LICENSE).

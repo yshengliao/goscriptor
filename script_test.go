@@ -2,11 +2,10 @@ package goscriptor
 
 import (
 	"context"
+	"os"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/go-redis/redis/v8"
-	"github.com/stretchr/testify/assert"
+	"github.com/yshengliao/goscriptor/redis"
 )
 
 const (
@@ -15,87 +14,87 @@ const (
 	helloScript          = `return 'Hello, World!'`
 )
 
-func mockRedisServer() *miniredis.Miniredis {
-	s, err := miniredis.Run()
-	if err != nil {
-		panic(err)
+func testRedisClient(t *testing.T) *redis.Client {
+	t.Helper()
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		t.Skip("REDIS_ADDR not set, skipping integration test")
 	}
-	s.FlushAll()
-	return s
-}
-
-func newRedisClient(addr string) redis.UniversalClient {
-	opt := &UniversalOptions{Addrs: []string{addr}, DB: 0, PoolSize: 1}
-	return opt.CreateAddrs()
+	client := redis.NewClient(&redis.Options{Addr: addr, DB: 0, PoolSize: 1})
+	client.FlushAll(context.Background())
+	return client
 }
 
 func TestScriptDescriptor_Register(t *testing.T) {
-	assert := assert.New(t)
-	s := mockRedisServer()
-	defer s.Close()
-
-	client := newRedisClient(s.Addr())
+	client := testRedisClient(t)
 	ctx := context.Background()
 
 	scripts := map[string]string{hello: helloScript}
 	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, &scripts, scriptDefinitionTest, 1)
-	assert.Nil(err)
+	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 	sha := sd.container[hello]
-	assert.NotEmpty(sha)
+	if sha == "" {
+		t.Fatal("expected non-empty SHA")
+	}
 
-	// verify the script was loaded
-	exists, err := client.(*redis.Client).ScriptExists(ctx, sha).Result()
-	assert.Nil(err)
-	assert.True(exists[0])
+	exists, err := client.ScriptExists(ctx, sha)
+	if err != nil {
+		t.Fatalf("ScriptExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("script should exist in cache")
+	}
 }
 
 func TestScriptDescriptor_LoadScripts(t *testing.T) {
-	assert := assert.New(t)
-	s := mockRedisServer()
-	defer s.Close()
-
-	client := newRedisClient(s.Addr())
+	client := testRedisClient(t)
 	ctx := context.Background()
 
 	scripts := map[string]string{hello: helloScript}
 	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, &scripts, scriptDefinitionTest, 1)
-	assert.Nil(err)
+	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 	sha := sd.container[hello]
 
 	sd2 := &ScriptDescriptor{}
 	err = sd2.LoadScripts(ctx, client, scriptDefinitionTest, 1)
-	assert.Nil(err)
-	assert.Equal(sha, sd2.container[hello])
+	if err != nil {
+		t.Fatalf("LoadScripts: %v", err)
+	}
+	if sd2.container[hello] != sha {
+		t.Fatalf("expected SHA %q, got %q", sha, sd2.container[hello])
+	}
 }
 
 func TestScriptDescriptor_LoadScripts_NoKey(t *testing.T) {
-	assert := assert.New(t)
-	s := mockRedisServer()
-	defer s.Close()
-
-	client := newRedisClient(s.Addr())
+	client := testRedisClient(t)
 	ctx := context.Background()
 
 	sd := &ScriptDescriptor{}
 	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
-	assert.Nil(err)
-	assert.Nil(sd.container)
+	if err != nil {
+		t.Fatalf("LoadScripts should not error on missing key: %v", err)
+	}
+	if sd.container != nil {
+		t.Fatalf("expected nil container, got %v", sd.container)
+	}
 }
 
 func TestScriptDescriptor_LoadScripts_MissingScript(t *testing.T) {
-	assert := assert.New(t)
-	s := mockRedisServer()
-	defer s.Close()
-
-	client := newRedisClient(s.Addr())
+	client := testRedisClient(t)
 	ctx := context.Background()
 
 	client.Do(ctx, "SELECT", 1)
-	client.(*redis.Client).HSet(ctx, scriptDefinitionTest, hello, "deadbeef")
+	client.HSet(ctx, scriptDefinitionTest, hello, "deadbeef")
 
 	sd := &ScriptDescriptor{}
 	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
-	assert.NotNil(err)
+	if err == nil {
+		t.Fatal("expected error for missing script in cache")
+	}
 }

@@ -11,3 +11,4 @@ env.*.bat
 env.*.sh
 
 .conf
+app

@@ -1,9 +1,10 @@
 package goscriptor_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/yshengliao/goscriptor"
 )
 
@@ -21,7 +22,11 @@ var (
 	}
 )
 
-func goscriptor_NewDB(host string, port int, scr map[string]string) (*goscriptor.Scriptor, error) {
+func newTestDB(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
+	t.Helper()
+	addr := redisAddr(t)
+	host, port := splitAddr(t, addr)
+
 	opt := &goscriptor.Option{
 		Host:     host,
 		Port:     port,
@@ -30,19 +35,23 @@ func goscriptor_NewDB(host string, port int, scr map[string]string) (*goscriptor
 		PoolSize: 1,
 	}
 
-	// opt := &goscriptor.Option{
-	// 	Host:     "127.0.0.1",
-	// 	Port:     6379,
-	// 	Password: "",
-	// 	DB:       0,
-	// 	PoolSize: 1,
-	// }
+	// Flush to ensure clean state
+	tmp := opt.Create()
+	tmp.FlushAll(context.Background())
+	tmp.Close()
 
-	scriptor, err := goscriptor.NewDB(opt, 1, scriptDefinition, &scr)
-	return scriptor, err
+	s, err := goscriptor.NewDB(opt, 1, scriptDefinition, scr)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	return s
 }
 
-func goscriptor_New(host string, port int, scr map[string]string, assert *assert.Assertions) (*goscriptor.Scriptor, error) {
+func newTestNew(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
+	t.Helper()
+	addr := redisAddr(t)
+	host, port := splitAddr(t, addr)
+
 	opt := &goscriptor.Option{
 		Host:     host,
 		Port:     port,
@@ -50,176 +59,188 @@ func goscriptor_New(host string, port int, scr map[string]string, assert *assert
 		DB:       0,
 		PoolSize: 1,
 	}
-	// opt := &goscriptor.Option{
-	// 	Host:     "127.0.0.1",
-	// 	Port:     6379,
-	// 	Password: "",
-	// 	DB:       0,
-	// 	PoolSize: 1,
-	// }
 
-	redis := opt.Create()
+	client := opt.Create()
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
 
-	assert.NotNil(redis)
-
-	scriptor, err := goscriptor.New(redis, 1, scriptDefinition, &scr)
-	return scriptor, err
+	s, err := goscriptor.New(client, 1, scriptDefinition, scr)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s
 }
 
-func goscriptor_TestCase(scriptor *goscriptor.Scriptor, assert *assert.Assertions) {
-	var res interface{}
-	var err error
+func assertTestCase(t *testing.T, scriptor *goscriptor.Scriptor) {
+	t.Helper()
+	ctx := context.Background()
 
-	res, err = scriptor.Exec("return 'Hello, World!'", []string{""})
-	assert.Nil(err)
-	assert.Equal("Hello, World!", res.(string), "they should be equal")
+	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", []string{""})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.(string) != "Hello, World!" {
+		t.Fatalf("expected 'Hello, World!', got %v", res)
+	}
 
-	res, err = scriptor.Exec("error return 'Hello, World!'", []string{""})
-	assert.NotNil(err)
+	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", []string{""})
+	if err == nil {
+		t.Fatal("expected error from bad script")
+	}
 
-	res, err = scriptor.ExecSha(hello, []string{""})
-	assert.Nil(err)
-	assert.Equal("Hello, World!", res.(string), "they should be equal")
+	res, err = scriptor.ExecSha(ctx, hello, []string{""})
+	if err != nil {
+		t.Fatalf("ExecSha: %v", err)
+	}
+	if res.(string) != "Hello, World!" {
+		t.Fatalf("expected 'Hello, World!', got %v", res)
+	}
 
-	res, err = scriptor.ExecSha(hello+" not found", []string{""})
-	assert.NotNil(err)
-	assert.Equal("script not found.", err.Error(), "they should be equal")
+	_, err = scriptor.ExecSha(ctx, hello+" not found", []string{""})
+	if err == nil {
+		t.Fatal("expected error for missing script")
+	}
+	if err.Error() != "goscriptor: script not found" {
+		t.Fatalf("expected 'goscriptor: script not found', got %q", err.Error())
+	}
 }
 
-func goscriptor_TestCaseScriptNil(scriptor *goscriptor.Scriptor, assert *assert.Assertions) {
-	var res interface{}
-	var err error
+func assertTestCaseScriptNil(t *testing.T, scriptor *goscriptor.Scriptor) {
+	t.Helper()
+	ctx := context.Background()
 
-	res, err = scriptor.Exec("return 'Hello, World!'", []string{""})
-	assert.Nil(err)
-	assert.Equal("Hello, World!", res.(string), "they should be equal")
+	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", []string{""})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.(string) != "Hello, World!" {
+		t.Fatalf("expected 'Hello, World!', got %v", res)
+	}
 
-	res, err = scriptor.Exec("error return 'Hello, World!'", []string{""})
-	assert.NotNil(err)
+	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", []string{""})
+	if err == nil {
+		t.Fatal("expected error from bad script")
+	}
 
-	res, err = scriptor.ExecSha(hello, []string{""})
-	assert.NotNil(err)
-	assert.Equal("script not found.", err.Error(), "they should be equal")
+	_, err = scriptor.ExecSha(ctx, hello, []string{""})
+	if err == nil {
+		t.Fatal("expected error for nil scripts")
+	}
+	if err.Error() != "goscriptor: script not found" {
+		t.Fatalf("expected 'goscriptor: script not found', got %q", err.Error())
+	}
 }
 
-func Test_goscriptor_NewDB(t *testing.T) {
-	var scriptor *goscriptor.Scriptor
-	var err error
+func TestNewDB(t *testing.T) {
+	_ = redisAddr(t)
 
-	assert := assert.New(t)
+	t.Run("nil scripts", func(t *testing.T) {
+		s := newTestDB(t, nil)
+		assertTestCaseScriptNil(t, s)
+	})
 
-	// Mock Redis
-	s := MockRedisServer()
-	assert.NotNil(s)
-	defer s.Close()
+	t.Run("empty scripts", func(t *testing.T) {
+		s := newTestDB(t, map[string]string{})
+		assertTestCaseScriptNil(t, s)
+	})
 
-	// scripts does not exist
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+	t.Run("register and exec", func(t *testing.T) {
+		s := newTestDB(t, scripts)
+		assertTestCase(t, s)
+	})
 
-	// scripts is empty
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+	t.Run("reload from cache", func(t *testing.T) {
+		addr := redisAddr(t)
+		host, port := splitAddr(t, addr)
+		opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
 
-	// register scripts
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, scripts)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+		// Flush then register
+		tmp := opt.Create()
+		tmp.FlushAll(context.Background())
+		tmp.Close()
 
-	// scripts does not exist, and reload redis cache scripts
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+		s1, err := goscriptor.NewDB(opt, 1, scriptDefinition, scripts)
+		if err != nil {
+			t.Fatalf("NewDB register: %v", err)
+		}
+		assertTestCase(t, s1)
 
-	// scripts is empty, and reload redis cache scripts
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+		// Reload from cache (nil scripts, no flush)
+		s2, err := goscriptor.NewDB(opt, 1, scriptDefinition, nil)
+		if err != nil {
+			t.Fatalf("NewDB reload: %v", err)
+		}
+		assertTestCase(t, s2)
+	})
 
-	// flushAll redis
-	ok, err := scriptor.Client.FlushAll(scriptor.CTX).Result()
-	assert.Nil(err)
-	assert.Equal("OK", ok, "they should be equal")
+	t.Run("flush and re-register", func(t *testing.T) {
+		s := newTestDB(t, scripts)
+		err := s.Client.FlushAll(context.Background())
+		if err != nil {
+			t.Fatalf("FlushAll: %v", err)
+		}
 
-	// scripts does not exist
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+		s2 := newTestDB(t, nil)
+		assertTestCaseScriptNil(t, s2)
 
-	// scripts is empty
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+		s3 := newTestDB(t, scripts)
+		assertTestCase(t, s3)
+	})
 
-	// can re-register scripts
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, scripts)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+	t.Run("nil option", func(t *testing.T) {
+		_, err := goscriptor.NewDB(nil, 1, scriptDefinition, nil)
+		if !errors.Is(err, goscriptor.ErrNilOption) {
+			t.Fatalf("expected ErrNilOption, got %v", err)
+		}
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		_, err := goscriptor.New(nil, 1, scriptDefinition, nil)
+		if !errors.Is(err, goscriptor.ErrNilClient) {
+			t.Fatalf("expected ErrNilClient, got %v", err)
+		}
+	})
 }
 
-func Test_goscriptor_New(t *testing.T) {
-	var scriptor *goscriptor.Scriptor
-	var err error
+func TestNew(t *testing.T) {
+	_ = redisAddr(t)
 
-	assert := assert.New(t)
+	t.Run("register and exec", func(t *testing.T) {
+		s := newTestNew(t, scripts)
+		assertTestCase(t, s)
+	})
 
-	// Mock Redis
-	s := MockRedisServer()
-	assert.NotNil(s)
-	defer s.Close()
+	t.Run("reload from cache", func(t *testing.T) {
+		_ = newTestNew(t, scripts)
+		s := newTestNew(t, nil)
+		assertTestCase(t, s)
+	})
+}
 
-	// scripts does not exist
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, nil, assert)
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+func TestExecSha_ContextCanceled(t *testing.T) {
+	_ = redisAddr(t)
 
-	// scripts is empty
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, map[string]string{}, assert)
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
+	s := newTestDB(t, scripts)
 
-	// register scripts
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, scripts, assert)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	// scripts does not exist, and reload redis cache scripts
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, nil, assert)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+	_, err := s.ExecSha(ctx, hello, []string{""})
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
 
-	// scripts is empty, and reload redis cache scripts
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, map[string]string{}, assert)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+func TestClose(t *testing.T) {
+	_ = redisAddr(t)
 
-	// flushAll redis
-	ok, err := scriptor.Client.FlushAll(scriptor.CTX).Result()
-	assert.Nil(err)
-	assert.Equal("OK", ok, "they should be equal")
-
-	// scripts does not exist
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, nil)
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
-
-	// scripts is empty
-	scriptor, err = goscriptor_NewDB(s.Host(), s.Server().Addr().Port, map[string]string{})
-	assert.Nil(err)
-	goscriptor_TestCaseScriptNil(scriptor, assert)
-
-	// can re-register scripts
-	scriptor, err = goscriptor_New(s.Host(), s.Server().Addr().Port, scripts, assert)
-	assert.Nil(err)
-	// run test cases
-	goscriptor_TestCase(scriptor, assert)
+	s := newTestDB(t, scripts)
+	err := s.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }

@@ -1,11 +1,20 @@
+// Package goscriptor provides a zero-dependency Redis Lua script manager for Go.
+//
+// It handles script registration, SHA1 caching, and atomic execution via EVALSHA,
+// backed by a built-in RESP2 Redis client with production-grade connection pooling.
+//
+// For standalone Redis client usage, import the redis sub-package:
+//
+//	import "github.com/yshengliao/goscriptor/redis"
+//
+// Note: This library uses the SELECT command internally. Redis Cluster is not supported.
 package goscriptor
 
 import (
 	"context"
-	"errors"
-	"sync"
+	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/yshengliao/goscriptor/redis"
 )
 
 // redis script definition
@@ -14,47 +23,41 @@ var (
 	scriptDefinition = "scriptor_v.0.0.0"
 )
 
-// Scriptor - the script manager
+// Scriptor manages Redis Lua scripts.
 type Scriptor struct {
-	Client                redis.UniversalClient
-	sRedisClientSyncOnce  sync.Once
+	Client                *redis.Client
 	scripts               map[string]string
 	redisScriptDB         int
 	redisScriptDefinition string
-	CTX                   context.Context
 }
 
-// New - create a new scriptor with the redis client
-func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition string, scripts *map[string]string) (*Scriptor, error) {
+// New creates a new scriptor with the given redis client.
+// Note: goscriptor does not support Redis Cluster because it uses the SELECT command internally.
+func New(client *redis.Client, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error) {
 	if client == nil {
-		return nil, errors.New("'client' cannot be nil")
+		return nil, ErrNilClient
 	}
 
-	// new scriptor
-	s := &Scriptor{}
-	s.sRedisClientSyncOnce.Do(func() {
-		s.Client = client
-		s.scripts = make(map[string]string)
-		s.redisScriptDB = scriptDB
+	s := &Scriptor{
+		Client:        client,
+		scripts:       make(map[string]string),
+		redisScriptDB: scriptDB,
+	}
 
-		// if redisScriptDefinition is not empty, use the default
-		if redisScriptDefinition != "" {
-			s.redisScriptDefinition = redisScriptDefinition
-		} else {
-			s.redisScriptDefinition = scriptDefinition
-		}
-	})
+	if redisScriptDefinition != "" {
+		s.redisScriptDefinition = redisScriptDefinition
+	} else {
+		s.redisScriptDefinition = scriptDefinition
+	}
 
-	s.CTX = context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// ping the redis server
-	_, err := s.Client.Ping(s.CTX).Result()
-	if err != nil {
+	if err := s.Client.Ping(ctx); err != nil {
 		return nil, err
 	}
 
-	// load all scripts or register scripts
-	scriptDescriptor, err := NewScriptDescriptor(s.CTX, s.Client, scripts, s.redisScriptDefinition, s.redisScriptDB)
+	scriptDescriptor, err := NewScriptDescriptor(ctx, s.Client, scripts, s.redisScriptDefinition, s.redisScriptDB)
 	if err != nil {
 		return nil, err
 	}
@@ -63,65 +66,33 @@ func New(client redis.UniversalClient, scriptDB int, redisScriptDefinition strin
 	return s, nil
 }
 
-// NewDB - create a new Scriptor with a new redis client
-func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts *map[string]string) (*Scriptor, error) {
+// NewDB creates a new Scriptor with a new redis client from Option.
+func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error) {
 	if opt == nil {
-		return nil, errors.New("'option' cannot be nil")
+		return nil, ErrNilOption
 	}
 
-	// new scriptor
-	s := &Scriptor{}
-	s.sRedisClientSyncOnce.Do(func() {
-		s.Client = opt.Create()
-		s.scripts = make(map[string]string)
-		s.redisScriptDB = scriptDB
-
-		// if redisScriptDefinition is not empty, use the default
-		if redisScriptDefinition != "" {
-			s.redisScriptDefinition = redisScriptDefinition
-		} else {
-			s.redisScriptDefinition = scriptDefinition
-		}
-	})
-
-	s.CTX = context.Background()
-
-	// ping the redis server
-	_, err := s.Client.Ping(s.CTX).Result()
-	if err != nil {
-		return nil, err
-	}
-
-	// load all scripts or register scripts
-	scriptDescriptor, err := NewScriptDescriptor(s.CTX, s.Client, scripts, s.redisScriptDefinition, s.redisScriptDB)
-	if err != nil {
-		return nil, err
-	}
-	s.scripts = scriptDescriptor.container
-
-	return s, nil
+	return New(opt.Create(), scriptDB, redisScriptDefinition, scripts)
 }
 
-// Exec - execute the script
-func (s *Scriptor) Exec(script string, keys []string, args ...interface{}) (interface{}, error) {
+// Exec executes a Lua script directly.
+func (s *Scriptor) Exec(ctx context.Context, script string, keys []string, args ...any) (any, error) {
 	if script == "" {
-		return nil, errors.New("script not found")
+		return nil, ErrScriptNotFound
 	}
-
-	res, err := s.Client.Eval(s.CTX, script, keys, args...).Result()
-
-	return res, err
+	return s.Client.Eval(ctx, script, keys, args...)
 }
 
-// ExecSha - execute the script
-func (s *Scriptor) ExecSha(scriptname string, keys []string, args ...interface{}) (interface{}, error) {
-	if s.scripts[scriptname] == "" || s.scripts == nil || len(s.scripts) == 0 {
-		return nil, errors.New("script not found.")
+// ExecSha executes a cached Lua script by name.
+func (s *Scriptor) ExecSha(ctx context.Context, scriptname string, keys []string, args ...any) (any, error) {
+	sha, ok := s.scripts[scriptname]
+	if !ok || sha == "" {
+		return nil, ErrScriptNotFound
 	}
-	return s.Client.EvalSha(s.CTX, s.scripts[scriptname], keys, args...).Result()
+	return s.Client.EvalSha(ctx, sha, keys, args...)
 }
 
-// stop closes the underlying Redis client.
-func (s *Scriptor) stop() {
-	s.Client.Close()
+// Close closes the underlying Redis client.
+func (s *Scriptor) Close() error {
+	return s.Client.Close()
 }

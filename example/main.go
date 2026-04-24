@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/yshengliao/goscriptor"
 )
 
@@ -18,8 +20,8 @@ type MyScriptor struct {
 }
 
 // hello function
-func (s *MyScriptor) hello() (string, error) {
-	res, err := s.Scriptor.ExecSha(hello, []string{})
+func (s *MyScriptor) hello(ctx context.Context) (string, error) {
+	res, err := s.Scriptor.ExecSha(ctx, hello, []string{})
 	if err != nil {
 		return "", err
 	}
@@ -40,7 +42,7 @@ func main() {
 		hello: _HelloworldTemplate,
 	}
 
-	scriptor, err := goscriptor.NewDB(opt, 1, scriptDefinition, &scripts)
+	scriptor, err := goscriptor.NewDB(opt, 1, scriptDefinition, scripts)
 	if err != nil {
 		panic(err)
 	}
@@ -48,21 +50,13 @@ func main() {
 	myscript := &MyScriptor{
 		Scriptor: scriptor,
 	}
-	res, err := myscript.hello()
-	if err != nil {
-		panic(err)
-	}
-	println(res)
+	ctx := context.Background()
 
-	res, err = myscript.hello()
-	if err != nil {
-		panic(err)
+	for range 2 {
+		res, err := myscript.hello(ctx)
+		if err != nil {
+			panic(err)
+		}
+		println(res)
 	}
-	println(res)
-
-	res, err = myscript.hello()
-	if err != nil {
-		panic(err)
-	}
-	println(res)
 }

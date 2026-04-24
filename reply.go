@@ -2,8 +2,6 @@ package goscriptor
 
 import (
 	"strconv"
-
-	null "gopkg.in/guregu/null.v3"
 )
 
 // EmptyRedisReplyValue represents a nil Redis reply value.
@@ -11,106 +9,100 @@ var EmptyRedisReplyValue = &RedisReplyValue{value: nil}
 
 // RedisReplyValue wraps a value returned from Redis.
 type RedisReplyValue struct {
-	value interface{}
+	value any
 }
 
 // NewRedisReplyValue creates a RedisReplyValue instance.
-func NewRedisReplyValue(value interface{}) *RedisReplyValue {
+func NewRedisReplyValue(value any) *RedisReplyValue {
 	return &RedisReplyValue{
 		value: value,
 	}
 }
 
 // Value returns the underlying value.
-func (v *RedisReplyValue) Value() interface{} {
+func (v *RedisReplyValue) Value() any {
 	return v.value
 }
 
-// AsInt32 -
+// AsInt32 converts the underlying value to an int32, returning a default if parsing fails.
 func (v *RedisReplyValue) AsInt32(defaultValue int32) (int32, error) {
 	if v.value != nil {
-		switch v.value.(type) {
+		switch val := v.value.(type) {
 		case string:
-			{
-				r, err := strconv.ParseFloat(v.value.(string), 32)
-				if err != nil {
-					return defaultValue, err
-				}
-				return int32(r), nil
+			r, err := strconv.ParseFloat(val, 32)
+			if err != nil {
+				return defaultValue, err
 			}
+			return int32(r), nil
 		case int:
-			return int32(v.value.(int)), nil
+			return int32(val), nil
 		case int32:
-			return v.value.(int32), nil
+			return val, nil
 		case int64:
-			return int32(v.value.(int64)), nil
+			return int32(val), nil
 		}
 	}
 	return defaultValue, nil
 }
 
-// AsInt64 -
+// AsInt64 converts the underlying value to an int64, returning a default if parsing fails.
 func (v *RedisReplyValue) AsInt64(defaultValue int64) (int64, error) {
 	if v.value != nil {
-		switch v.value.(type) {
+		switch val := v.value.(type) {
 		case string:
-			{
-				r, err := strconv.ParseFloat(v.value.(string), 64)
-				if err != nil {
-					return defaultValue, err
-				}
-				return int64(r), nil
+			r, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				return defaultValue, err
 			}
+			return int64(r), nil
 		case int:
-			return int64(v.value.(int)), nil
+			return int64(val), nil
 		case int32:
-			return int64(v.value.(int32)), nil
+			return int64(val), nil
 		case int64:
-			return v.value.(int64), nil
+			return val, nil
 		}
 	}
 	return defaultValue, nil
 }
 
-// AsFloat64 -
+// AsFloat64 converts the underlying value to a float64, returning a default if parsing fails.
 func (v *RedisReplyValue) AsFloat64(defaultValue float64) (float64, error) {
 	if v.value != nil {
-		switch v.value.(type) {
+		switch val := v.value.(type) {
 		case string:
-			{
-				r, err := strconv.ParseFloat(v.value.(string), 64)
-				if err != nil {
-					return defaultValue, err
-				}
-				return r, nil
+			r, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				return defaultValue, err
 			}
+			return r, nil
 		case int:
-			return float64(v.value.(int)), nil
+			return float64(val), nil
 		case int32:
-			return float64(v.value.(int32)), nil
+			return float64(val), nil
 		case int64:
-			return float64(v.value.(int64)), nil
+			return float64(val), nil
 		case float32:
-			return float64(v.value.(float32)), nil
+			return float64(val), nil
 		case float64:
-			return v.value.(float64), nil
+			return val, nil
 		}
 	}
 	return defaultValue, nil
 }
 
-// AsString -
+// AsString converts the underlying value to a string.
 func (v *RedisReplyValue) AsString() string {
 	if v.value != nil {
-		switch v.value.(type) {
+		switch val := v.value.(type) {
 		case string:
-			return v.value.(string)
+			return val
 		case int:
-			return strconv.FormatInt(int64(v.value.(int)), 10)
+			return strconv.FormatInt(int64(val), 10)
 		case int32:
-			return strconv.FormatInt(int64(v.value.(int32)), 10)
+			return strconv.FormatInt(int64(val), 10)
 		case int64:
-			return strconv.FormatInt(v.value.(int64), 10)
+			return strconv.FormatInt(val, 10)
 		}
 	}
 	return ""
@@ -124,91 +116,96 @@ func (v *RedisReplyValue) IsNil() bool {
 // ToArrayReplyReader converts the value to a RedisArrayReplyReader
 // when it contains a slice of interfaces.
 func (v *RedisReplyValue) ToArrayReplyReader() *RedisArrayReplyReader {
-	i, ok := v.value.([]interface{})
+	i, ok := v.value.([]any)
 	if ok {
 		return NewRedisArrayReplyReader(i)
 	}
 	return nil
 }
 
-// GetNullableInt -
-func GetNullableInt(value *RedisReplyValue) (null.Int, error) {
-	if value.value == nil {
-		return null.IntFromPtr(nil), nil
+// NullableInt returns a pointer to the underlying int64 value, or nil if the value is nil.
+func (v *RedisReplyValue) NullableInt() (*int64, error) {
+	if v.value == nil {
+		return nil, nil
 	}
-	var result int64
-	var err error
-	if result, err = value.AsInt64(0); err != nil {
-		return null.IntFromPtr(nil), err
+	result, err := v.AsInt64(0)
+	if err != nil {
+		return nil, err
 	}
-	return null.IntFrom(result), nil
+	return &result, nil
 }
 
-// GetNullableString -
-func GetNullableString(value *RedisReplyValue) null.String {
-	if value.value == nil {
-		return null.StringFromPtr(nil)
+// NullableString returns a pointer to the underlying string value, or nil if the value is nil.
+func (v *RedisReplyValue) NullableString() *string {
+	if v.value == nil {
+		return nil
 	}
-	return null.StringFrom(value.AsString())
+	s := v.AsString()
+	return &s
 }
 
-// RedisArrayReplyReader -
+// RedisArrayReplyReader provides sequential access to an array reply.
 type RedisArrayReplyReader struct {
-	redisReply []interface{}
+	redisReply []any
 	position   uint32
 }
 
-// NewRedisArrayReplyReader -
-func NewRedisArrayReplyReader(redisReply []interface{}) *RedisArrayReplyReader {
+// NewRedisArrayReplyReader creates a new reader for the given array reply.
+func NewRedisArrayReplyReader(redisReply []any) *RedisArrayReplyReader {
 	return &RedisArrayReplyReader{
 		redisReply: redisReply,
 		position:   0,
 	}
 }
 
-// GetLength -
+// GetLength returns the total number of items in the array reply.
 func (r *RedisArrayReplyReader) GetLength() int {
 	return len(r.redisReply)
 }
 
-// HasNext -
+// HasNext returns true if there are more items to read.
 func (r *RedisArrayReplyReader) HasNext() bool {
 	values := r.redisReply
 	pos := r.position
 	return pos < uint32(len(values))
 }
 
-// ReadArray -
+// ReadArray reads the next value as a nested array reply reader.
 func (r *RedisArrayReplyReader) ReadArray() *RedisArrayReplyReader {
-	return NewRedisArrayReplyReader(r.ReadValue().value.([]interface{}))
+	val := r.ReadValue().value
+	arr, ok := val.([]any)
+	if !ok {
+		return nil
+	}
+	return NewRedisArrayReplyReader(arr)
 }
 
-// ReadString -
+// ReadString reads the next value and converts it to a string.
 func (r *RedisArrayReplyReader) ReadString() string {
 	return r.ReadValue().AsString()
 }
 
-// ReadInt32 -
+// ReadInt32 reads the next value and converts it to an int32.
 func (r *RedisArrayReplyReader) ReadInt32(defaultValue int32) (int32, error) {
 	return r.ReadValue().AsInt32(defaultValue)
 }
 
-// ReadInt64 -
+// ReadInt64 reads the next value and converts it to an int64.
 func (r *RedisArrayReplyReader) ReadInt64(defaultValue int64) (int64, error) {
 	return r.ReadValue().AsInt64(defaultValue)
 }
 
-// ReadFloat64 -
+// ReadFloat64 reads the next value and converts it to a float64.
 func (r *RedisArrayReplyReader) ReadFloat64(defaultValue float64) (float64, error) {
 	return r.ReadValue().AsFloat64(defaultValue)
 }
 
-// SkipValue -
+// SkipValue skips over the next value in the array.
 func (r *RedisArrayReplyReader) SkipValue() {
 	r.ReadValue()
 }
 
-// ReadValue -
+// ReadValue reads the next value as a RedisReplyValue.
 func (r *RedisArrayReplyReader) ReadValue() *RedisReplyValue {
 	values := r.redisReply
 	pos := r.position
@@ -219,7 +216,7 @@ func (r *RedisArrayReplyReader) ReadValue() *RedisReplyValue {
 	return EmptyRedisReplyValue
 }
 
-// ForEach -
+// ForEach iterates through the remaining items, executing the action function for each item.
 func (r *RedisArrayReplyReader) ForEach(action func(i int, v *RedisReplyValue) error) error {
 	for i, v := range r.redisReply {
 		err := action(i, &RedisReplyValue{value: v})
