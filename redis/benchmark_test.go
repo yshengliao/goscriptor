@@ -1,4 +1,4 @@
-package goscriptor_test
+package redis_test
 
 import (
 	"context"

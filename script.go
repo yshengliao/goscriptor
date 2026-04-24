@@ -33,6 +33,20 @@ var (
 		redis.pcall('SELECT', ARGV[1])
 		return redis.call('HEXISTS', KEYS[1], ARGV[2])
 	`
+
+	// availableLuaScriptTemplate combines EXISTS + HEXISTS + HGET in a single
+	// round-trip. Returns the SHA1 string if the key, field, and script cache
+	// all exist; otherwise returns a descriptive error string.
+	availableLuaScriptTemplate = `
+		redis.pcall('SELECT', ARGV[1])
+		if redis.call('EXISTS', KEYS[1]) == 0 then
+			return redis.error_reply('KEY_NOT_FOUND')
+		end
+		if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
+			return redis.error_reply('FIELD_NOT_FOUND')
+		end
+		return redis.call('HGET', KEYS[1], ARGV[2])
+	`
 )
 
 // ScriptDescriptor manages script registration and loading.
@@ -153,7 +167,7 @@ func keyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptDe
 
 // mkeyExistsLuaScript checks if a script member key exists in the hash.
 func mkeyExistsLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, mkey string, db int) error {
-	exists, err := client.Eval(ctx, hexistsLuaScriptTemplate, []string{redisScriptDefinition, mkey}, db)
+	exists, err := client.Eval(ctx, hexistsLuaScriptTemplate, []string{redisScriptDefinition}, db, mkey)
 	if err != nil {
 		return err
 	}
@@ -191,17 +205,21 @@ func setLuaScript(ctx context.Context, client *redis.Client, redisScriptDefiniti
 	return err
 }
 
-// availableLuaScript checks that a script exists in both the hash and the script cache.
+// availableLuaScript checks that a script exists in both the hash and the
+// Redis script cache, using a single EVAL round-trip for the hash lookup.
 func availableLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int, name string) (string, error) {
-	if err := keyExistsLuaScript(ctx, client, redisScriptDefinition, db); err != nil {
-		return "", err
-	}
-	if err := mkeyExistsLuaScript(ctx, client, redisScriptDefinition, name, db); err != nil {
-		return "", err
-	}
-	sha1, err := getLuaScript(ctx, client, redisScriptDefinition, name, db)
+	res, err := client.Eval(ctx, availableLuaScriptTemplate, []string{redisScriptDefinition}, db, name)
 	if err != nil {
+		// Map Lua error replies to sentinel errors
+		errMsg := err.Error()
+		if errMsg == "KEY_NOT_FOUND" || errMsg == "FIELD_NOT_FOUND" {
+			return "", ErrKeyNotFound
+		}
 		return "", err
+	}
+	sha1, ok := res.(string)
+	if !ok || sha1 == "" {
+		return "", ErrScriptNotFound
 	}
 
 	exists, err := client.ScriptExists(ctx, sha1)
