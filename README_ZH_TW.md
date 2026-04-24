@@ -158,6 +158,12 @@ REDIS_ADDR=127.0.0.1:6379 go test -v ./...
 
 ## 變更紀錄
 
+### v0.5.2-alpha
+- **效能優化**：透過 `sync.Pool` 實現 RESP2 指令序列化的近乎零記憶體分配 (Zero-allocation)，PING 操作降至 20 B/op, 2 allocs/op。
+- **效能優化**：優化 `ReadReply` 解析，避免整數解析時的字串轉換分配。
+- **錯誤修復**：修復了當 `Close()` 喚醒等待中的連線池 goroutine 時導致的 nil pointer dereference 嚴重錯誤。
+- **測試擴充**：測試覆蓋率提升至 79% (包含連線池耗盡、Waiter 上下文取消、協議解析的極端測試)。
+
 ### v0.5.1-alpha (2026-04-24)
 
 - 以內建 RESP2 client 取代 `go-redis/v9`——**零外部依賴**。

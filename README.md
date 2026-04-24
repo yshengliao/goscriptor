@@ -158,6 +158,12 @@ REDIS_ADDR=127.0.0.1:6379 go test -v ./...
 
 ## Changelog
 
+### v0.5.2-alpha
+- **Performance**: Achieved near zero-allocation for RESP2 serialization using `sync.Pool` (PING: 20 B/op, 2 allocs/op).
+- **Performance**: Optimized `ReadReply` to avoid string allocations during integer parsing.
+- **Bug Fix**: Fixed a critical nil pointer dereference issue when waking waiting goroutines in the connection pool via `Close()`.
+- **Tests**: Increased test coverage to 79% (pool exhaustion, waiter cancellation, robust RESP parsing).
+
 ### v0.5.1-alpha (2026-04-24)
 
 - Replaced `go-redis/v9` with built-in RESP2 client — **zero external dependencies**.
