@@ -59,6 +59,9 @@ go-redis uses a builder pattern (`.Result()`). The built-in client returns value
 
 ### Nil Handling
 
+The built-in client does not use a sentinel `redis.Nil` error. Missing keys return
+an empty string with a nil error:
+
 ```diff
 -if err == redis.Nil {
 +if val == "" {  // Get returns "" for missing keys
@@ -66,12 +69,26 @@ go-redis uses a builder pattern (`.Result()`). The built-in client returns value
  }
 ```
 
+> **Caveat:** `Get`, `HGet`, `LPop`, and `RPop` return `("", nil)` for **both** a
+> missing key/field **and** a key/field whose stored value is the empty string.
+> Callers that need to distinguish these cases should use `Exists`/`HExists` before
+> the read, or store a sentinel value instead of the empty string.
+
 ### Raw Commands
 
 ```diff
 -client.Do(ctx, "CUSTOM", "ARG1", "ARG2").Result()
 +client.Do(ctx, "CUSTOM", "ARG1", "ARG2")
 ```
+
+> **Important:** `Do` is a strict single request/reply exchange. The following
+> multi-message patterns will **desync the connection** and are **not supported**:
+>
+> - `SUBSCRIBE` / `PSUBSCRIBE` (pub-sub)
+> - `MULTI` / `EXEC` (transactions)
+> - Pipelining (sending multiple commands without reading replies in between)
+>
+> Single raw commands (`ZADD`, `ZRANGE`, `XADD`, etc.) are fine.
 
 ## What's Not Supported
 
@@ -83,4 +100,5 @@ The built-in client is deliberately minimal. It does **not** support:
 - Streams (`XADD`, `XREAD`)
 - Sorted Sets (`ZADD`, `ZRANGE`)
 
-For these, use `client.Do(ctx, "ZADD", ...)` with raw commands, or keep `go-redis/v9` for that part of your application.
+For these, use `client.Do(ctx, "ZADD", ...)` with raw commands for occasional use,
+or keep `go-redis/v9` for that part of your application.
