@@ -46,22 +46,23 @@ func main() {
 		hello: _HelloworldTemplate,
 	}
 
-	scriptor, err := goscriptor.NewDB(opt, 1, scriptDefinition, scripts)
+	ctx := context.Background()
+
+	scriptor, err := goscriptor.NewDB(ctx, opt, 1, scriptDefinition, scripts)
 	if err != nil {
 		panic(err)
 	}
-	defer scriptor.Close()
+	defer func() { _ = scriptor.Close() }()
 
 	myscript := &MyScriptor{
 		Scriptor: scriptor,
 	}
-	ctx := context.Background()
 
 	for range 2 {
 		res, err := myscript.hello(ctx)
 		if err != nil {
 			panic(err)
 		}
-		println(res)
+		fmt.Println(res)
 	}
 }

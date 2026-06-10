@@ -30,12 +30,12 @@ func TestScriptDescriptor_Register(t *testing.T) {
 	ctx := context.Background()
 
 	scripts := map[string]string{hello: helloScript}
-	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.register(ctx, client, scripts, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("register: %v", err)
 	}
-	sha := sd.container[hello]
+	sha := sd.container[hello].sha
 	if sha == "" {
 		t.Fatal("expected non-empty SHA")
 	}
@@ -54,20 +54,20 @@ func TestScriptDescriptor_LoadScripts(t *testing.T) {
 	ctx := context.Background()
 
 	scripts := map[string]string{hello: helloScript}
-	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.register(ctx, client, scripts, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("register: %v", err)
 	}
-	sha := sd.container[hello]
+	sha := sd.container[hello].sha
 
-	sd2 := &ScriptDescriptor{}
-	err = sd2.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd2 := &scriptDescriptor{}
+	err = sd2.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("LoadScripts: %v", err)
+		t.Fatalf("loadScripts: %v", err)
 	}
-	if sd2.container[hello] != sha {
-		t.Fatalf("expected SHA %q, got %q", sha, sd2.container[hello])
+	if sd2.container[hello].sha != sha {
+		t.Fatalf("expected SHA %q, got %q", sha, sd2.container[hello].sha)
 	}
 }
 
@@ -75,10 +75,10 @@ func TestScriptDescriptor_LoadScripts_NoKey(t *testing.T) {
 	client := testRedisClient(t)
 	ctx := context.Background()
 
-	sd := &ScriptDescriptor{}
-	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("LoadScripts should not error on missing key: %v", err)
+		t.Fatalf("loadScripts should not error on missing key: %v", err)
 	}
 	if len(sd.container) != 0 {
 		t.Fatalf("expected empty container, got %v", sd.container)
@@ -92,8 +92,8 @@ func TestScriptDescriptor_LoadScripts_MissingScript(t *testing.T) {
 	client.Do(ctx, "SELECT", 1)
 	client.HSet(ctx, scriptDefinitionTest, hello, "deadbeef")
 
-	sd := &ScriptDescriptor{}
-	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err == nil {
 		t.Fatal("expected error for missing script in cache")
 	}

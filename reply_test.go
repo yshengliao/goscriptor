@@ -1,6 +1,8 @@
 package goscriptor_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/yshengliao/goscriptor"
@@ -245,15 +247,18 @@ func TestExec_EmptyScript(t *testing.T) {
 	host, port := splitAddr(t, addr)
 
 	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
-	s, err := goscriptor.NewDB(opt, 1, "test_empty_script", nil)
+	s, err := goscriptor.NewDB(context.Background(), opt, 1, "test_empty_script", nil)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
-	_, err = s.Exec(nil, "", nil)
+	_, err = s.Exec(context.Background(), "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty script")
+	}
+	if !errors.Is(err, goscriptor.ErrEmptyScript) {
+		t.Fatalf("expected ErrEmptyScript, got %v", err)
 	}
 }
 

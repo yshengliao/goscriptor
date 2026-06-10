@@ -2,6 +2,8 @@ package goscriptor
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -36,30 +38,40 @@ var (
 	`
 )
 
-// ScriptDescriptor manages script registration and loading.
-type ScriptDescriptor struct {
-	container map[string]string
+// scriptEntry pairs a script's SHA1 hash with its source body. The body is
+// retained so a Scriptor can re-load a script into the Redis script cache and
+// self-heal after a NOSCRIPT failure (e.g. a Redis restart or SCRIPT FLUSH).
+// When the body is empty (the load-from-cache path), self-healing is not
+// possible.
+type scriptEntry struct {
+	sha  string
+	body string
 }
 
-// NewScriptDescriptor creates a new script descriptor.
-func NewScriptDescriptor(ctx context.Context, client *redis.Client, scripts map[string]string, redisScriptDefinition string, db int) (*ScriptDescriptor, error) {
+// scriptDescriptor manages script registration and loading.
+type scriptDescriptor struct {
+	container map[string]scriptEntry
+}
+
+// newScriptDescriptor creates a new script descriptor.
+func newScriptDescriptor(ctx context.Context, client *redis.Client, scripts map[string]string, redisScriptDefinition string, db int) (*scriptDescriptor, error) {
 	if client == nil {
 		return nil, ErrNilClient
 	}
 
-	sd := &ScriptDescriptor{
-		container: make(map[string]string),
+	sd := &scriptDescriptor{
+		container: make(map[string]scriptEntry),
 	}
 
 	if len(scripts) == 0 {
-		err := sd.LoadScripts(ctx, client, redisScriptDefinition, db)
+		err := sd.loadScripts(ctx, client, redisScriptDefinition, db)
 		if err != nil {
 			return nil, err
 		}
 		return sd, nil
 	}
 
-	err := sd.Register(ctx, client, scripts, redisScriptDefinition, db)
+	err := sd.register(ctx, client, scripts, redisScriptDefinition, db)
 	if err != nil {
 		return nil, err
 	}
@@ -67,51 +79,62 @@ func NewScriptDescriptor(ctx context.Context, client *redis.Client, scripts map[
 	return sd, nil
 }
 
-// Register loads scripts into Redis and records their SHA1 hashes.
-func (sd *ScriptDescriptor) Register(ctx context.Context, client *redis.Client, scripts map[string]string, redisScriptDefinition string, db int) error {
+// register loads scripts into Redis and records their SHA1 hashes alongside
+// their source bodies. A cached SHA1 is reused only when it matches the SHA1
+// of the current body; on a mismatch the new body is loaded and persisted so
+// that a changed script body under the same name always wins.
+func (sd *scriptDescriptor) register(ctx context.Context, client *redis.Client, scripts map[string]string, redisScriptDefinition string, db int) error {
 	if client == nil {
 		return ErrNilClient
 	}
 
-	sd.container = make(map[string]string)
+	sd.container = make(map[string]scriptEntry)
 
 	for name, body := range scripts {
-		sha1, err := availableLuaScript(ctx, client, redisScriptDefinition, db, name)
-		if err == nil {
-			sd.container[name] = sha1
+		sha1hash, err := availableLuaScript(ctx, client, redisScriptDefinition, db, name)
+		if err == nil && sha1hash == sha1Hex(body) {
+			// The cached SHA matches the current body: reuse it.
+			sd.container[name] = scriptEntry{sha: sha1hash, body: body}
 			continue
 		}
 
-		// ErrKeyNotFound, ErrScriptNotFound, and ErrScriptNotCached are all
-		// expected "not registered yet" cases — fall through to reload.
-		// Any other error (network failure, auth error, etc.) is a real problem.
-		if !errors.Is(err, ErrKeyNotFound) && !errors.Is(err, ErrScriptNotFound) && !errors.Is(err, ErrScriptNotCached) {
+		// A real error (network failure, auth error, etc.) must surface. The
+		// expected "not registered yet" cases — ErrKeyNotFound,
+		// ErrScriptNotFound, ErrScriptNotCached — fall through to reload, as
+		// does a stale-SHA mismatch (err == nil but the digest differs).
+		if err != nil && !errors.Is(err, ErrKeyNotFound) && !errors.Is(err, ErrScriptNotFound) && !errors.Is(err, ErrScriptNotCached) {
 			return fmt.Errorf("goscriptor: checking script %q: %w", name, err)
 		}
 
-		sha1, err = client.ScriptLoad(ctx, body)
+		sha1hash, err = client.ScriptLoad(ctx, body)
 		if err != nil {
 			return err
 		}
 
-		err = setLuaScript(ctx, client, redisScriptDefinition, name, sha1, db)
+		err = setLuaScript(ctx, client, redisScriptDefinition, name, sha1hash, db)
 		if err != nil {
 			return err
 		}
 
-		sd.container[name] = sha1
+		sd.container[name] = scriptEntry{sha: sha1hash, body: body}
 	}
 
 	return nil
 }
 
-// LoadScripts loads previously registered script SHA1 hashes from Redis.
-func (sd *ScriptDescriptor) LoadScripts(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int) error {
+// loadScripts loads previously registered script SHA1 hashes from Redis.
+//
+// Because the source bodies are unknown when loading from the registry, the
+// resulting entries carry empty bodies. A Scriptor built this way cannot
+// self-heal after the Redis script cache is flushed (e.g. SCRIPT FLUSH or a
+// Redis restart): ExecSha will return ErrScriptNotCached in that case. Build
+// the Scriptor with explicit script bodies to enable self-healing.
+func (sd *scriptDescriptor) loadScripts(ctx context.Context, client *redis.Client, redisScriptDefinition string, db int) error {
 	if client == nil {
 		return ErrNilClient
 	}
 
-	sd.container = make(map[string]string)
+	sd.container = make(map[string]scriptEntry)
 
 	res, err := client.Eval(ctx, loadLuaScriptTemplate, []string{redisScriptDefinition}, db)
 	if err != nil {
@@ -152,7 +175,7 @@ func (sd *ScriptDescriptor) LoadScripts(ctx context.Context, client *redis.Clien
 		if !exists {
 			return ErrScriptNotCached
 		}
-		sd.container[keyStr] = valueStr
+		sd.container[keyStr] = scriptEntry{sha: valueStr}
 	}
 
 	return nil
@@ -162,6 +185,13 @@ func (sd *ScriptDescriptor) LoadScripts(ctx context.Context, client *redis.Clien
 func setLuaScript(ctx context.Context, client *redis.Client, redisScriptDefinition string, name string, sha1 string, db int) error {
 	_, err := client.Eval(ctx, setLuaScriptTemplate, []string{redisScriptDefinition}, db, name, sha1)
 	return err
+}
+
+// sha1Hex returns the SHA1 hex digest of body, matching the SHA1 that Redis
+// computes for SCRIPT LOAD.
+func sha1Hex(body string) string {
+	sum := sha1.Sum([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 // availableLuaScript checks that a script exists in both the hash and the
@@ -174,13 +204,13 @@ func availableLuaScript(ctx context.Context, client *redis.Client, redisScriptDe
 		return "", err
 	}
 
-	sha1, ok := res.(string)
+	sha1hash, ok := res.(string)
 	if !ok {
 		// Nil or non-string reply — treat as not found.
 		return "", ErrScriptNotFound
 	}
 
-	switch sha1 {
+	switch sha1hash {
 	case "__GOSCRIPTOR_KEY_NOT_FOUND__":
 		return "", ErrKeyNotFound
 	case "__GOSCRIPTOR_FIELD_NOT_FOUND__":
@@ -189,7 +219,7 @@ func availableLuaScript(ctx context.Context, client *redis.Client, redisScriptDe
 		return "", ErrScriptNotFound
 	}
 
-	exists, err := client.ScriptExists(ctx, sha1)
+	exists, err := client.ScriptExists(ctx, sha1hash)
 	if err != nil {
 		return "", err
 	}
@@ -197,5 +227,5 @@ func availableLuaScript(ctx context.Context, client *redis.Client, redisScriptDe
 		return "", ErrScriptNotCached
 	}
 
-	return sha1, nil
+	return sha1hash, nil
 }

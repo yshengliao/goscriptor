@@ -40,7 +40,7 @@ func newTestDB(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
 	tmp.FlushAll(context.Background())
 	tmp.Close()
 
-	s, err := goscriptor.NewDB(opt, 1, scriptDefinition, scr)
+	s, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, scr)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
@@ -65,7 +65,7 @@ func newTestNew(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
 		t.Fatal("expected non-nil client")
 	}
 
-	s, err := goscriptor.New(client, 1, scriptDefinition, scr)
+	s, err := goscriptor.New(context.Background(), client, 1, scriptDefinition, scr)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -160,14 +160,14 @@ func TestNewDB(t *testing.T) {
 		tmp.FlushAll(context.Background())
 		tmp.Close()
 
-		s1, err := goscriptor.NewDB(opt, 1, scriptDefinition, scripts)
+		s1, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, scripts)
 		if err != nil {
 			t.Fatalf("NewDB register: %v", err)
 		}
 		assertTestCase(t, s1)
 
 		// Reload from cache (nil scripts, no flush)
-		s2, err := goscriptor.NewDB(opt, 1, scriptDefinition, nil)
+		s2, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, nil)
 		if err != nil {
 			t.Fatalf("NewDB reload: %v", err)
 		}
@@ -189,14 +189,14 @@ func TestNewDB(t *testing.T) {
 	})
 
 	t.Run("nil option", func(t *testing.T) {
-		_, err := goscriptor.NewDB(nil, 1, scriptDefinition, nil)
+		_, err := goscriptor.NewDB(context.Background(), nil, 1, scriptDefinition, nil)
 		if !errors.Is(err, goscriptor.ErrNilOption) {
 			t.Fatalf("expected ErrNilOption, got %v", err)
 		}
 	})
 
 	t.Run("nil client", func(t *testing.T) {
-		_, err := goscriptor.New(nil, 1, scriptDefinition, nil)
+		_, err := goscriptor.New(context.Background(), nil, 1, scriptDefinition, nil)
 		if !errors.Is(err, goscriptor.ErrNilClient) {
 			t.Fatalf("expected ErrNilClient, got %v", err)
 		}
@@ -242,5 +242,137 @@ func TestClose(t *testing.T) {
 	err := s.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestExecSha_NoScriptSelfHeal verifies that after the Redis script cache is
+// flushed, ExecSha transparently reloads the retained script body and succeeds,
+// and that a subsequent ExecSha also succeeds against the refreshed cache.
+func TestExecSha_NoScriptSelfHeal(t *testing.T) {
+	_ = redisAddr(t)
+
+	s := newTestDB(t, scripts)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+
+	// Sanity: first execution works against the freshly registered script.
+	if _, err := s.ExecSha(ctx, hello, []string{""}); err != nil {
+		t.Fatalf("initial ExecSha: %v", err)
+	}
+
+	// Wipe the Redis script cache out from under the Scriptor.
+	if _, err := s.Client.Do(ctx, "SCRIPT", "FLUSH"); err != nil {
+		t.Fatalf("SCRIPT FLUSH: %v", err)
+	}
+
+	// Self-heal: the NOSCRIPT path must reload the body and succeed.
+	res, err := s.ExecSha(ctx, hello, []string{""})
+	if err != nil {
+		t.Fatalf("ExecSha after flush (self-heal): %v", err)
+	}
+	if res.(string) != "Hello, World!" {
+		t.Fatalf("expected 'Hello, World!', got %v", res)
+	}
+
+	// The cache is now refreshed; a second call must succeed without reloading.
+	res, err = s.ExecSha(ctx, hello, []string{""})
+	if err != nil {
+		t.Fatalf("second ExecSha after self-heal: %v", err)
+	}
+	if res.(string) != "Hello, World!" {
+		t.Fatalf("expected 'Hello, World!', got %v", res)
+	}
+}
+
+// TestExecSha_ChangedBodyReRegister verifies that registering a different body
+// under an existing name (same definition) supersedes the stale cached SHA, so
+// ExecSha returns the new body's result.
+func TestExecSha_ChangedBodyReRegister(t *testing.T) {
+	addr := redisAddr(t)
+	host, port := splitAddr(t, addr)
+	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
+
+	// Clean slate.
+	tmp := opt.Create()
+	tmp.FlushAll(context.Background())
+	tmp.Close()
+
+	const def = "changed_body|def"
+	const name = "swap"
+
+	ctx := context.Background()
+
+	// First Scriptor registers body A under name "swap".
+	s1, err := goscriptor.NewDB(ctx, opt, 1, def, map[string]string{name: "return 'A'"})
+	if err != nil {
+		t.Fatalf("NewDB s1: %v", err)
+	}
+	defer func() { _ = s1.Close() }()
+
+	resA, err := s1.ExecSha(ctx, name, []string{""})
+	if err != nil {
+		t.Fatalf("s1 ExecSha: %v", err)
+	}
+	if resA.(string) != "A" {
+		t.Fatalf("expected 'A', got %v", resA)
+	}
+
+	// Second Scriptor, same definition + name, but a changed body B. The
+	// stale-SHA verification must cause B to be loaded and persisted.
+	s2, err := goscriptor.NewDB(ctx, opt, 1, def, map[string]string{name: "return 'B'"})
+	if err != nil {
+		t.Fatalf("NewDB s2: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	resB, err := s2.ExecSha(ctx, name, []string{""})
+	if err != nil {
+		t.Fatalf("s2 ExecSha: %v", err)
+	}
+	if resB.(string) != "B" {
+		t.Fatalf("expected 'B' from changed body, got %v", resB)
+	}
+}
+
+// TestExecSha_LoadFromCacheNoSelfHeal verifies that a Scriptor built via the
+// load-from-cache path (nil scripts) carries no script bodies and therefore
+// cannot self-heal: after a SCRIPT FLUSH, ExecSha returns an error satisfying
+// errors.Is(err, ErrScriptNotCached).
+func TestExecSha_LoadFromCacheNoSelfHeal(t *testing.T) {
+	addr := redisAddr(t)
+	host, port := splitAddr(t, addr)
+	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
+
+	// Clean slate, then register via a first Scriptor.
+	tmp := opt.Create()
+	tmp.FlushAll(context.Background())
+	tmp.Close()
+
+	ctx := context.Background()
+
+	s1, err := goscriptor.NewDB(ctx, opt, 1, scriptDefinition, scripts)
+	if err != nil {
+		t.Fatalf("NewDB s1: %v", err)
+	}
+	defer func() { _ = s1.Close() }()
+
+	// Second Scriptor loads from cache (nil scripts) — no bodies retained.
+	s2, err := goscriptor.NewDB(ctx, opt, 1, scriptDefinition, nil)
+	if err != nil {
+		t.Fatalf("NewDB s2 (load from cache): %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	// Flush the script cache; s2 has no body to reload from.
+	if _, err := s2.Client.Do(ctx, "SCRIPT", "FLUSH"); err != nil {
+		t.Fatalf("SCRIPT FLUSH: %v", err)
+	}
+
+	_, err = s2.ExecSha(ctx, hello, []string{""})
+	if err == nil {
+		t.Fatal("expected error from load-from-cache Scriptor after flush")
+	}
+	if !errors.Is(err, goscriptor.ErrScriptNotCached) {
+		t.Fatalf("expected ErrScriptNotCached, got %v", err)
 	}
 }

@@ -12,6 +12,9 @@ var (
 	// ErrScriptNotFound is returned when a script is not found in the local registry or Redis.
 	ErrScriptNotFound = errors.New("goscriptor: script not found")
 
+	// ErrEmptyScript is returned when an empty script body is passed to Exec.
+	ErrEmptyScript = errors.New("goscriptor: empty script")
+
 	// ErrKeyNotFound is returned when the script definition key does not exist in Redis.
 	ErrKeyNotFound = errors.New("goscriptor: script key does not exist")
 
