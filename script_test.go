@@ -80,8 +80,8 @@ func TestScriptDescriptor_LoadScripts_NoKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadScripts should not error on missing key: %v", err)
 	}
-	if sd.container != nil {
-		t.Fatalf("expected nil container, got %v", sd.container)
+	if len(sd.container) != 0 {
+		t.Fatalf("expected empty container, got %v", sd.container)
 	}
 }
 
