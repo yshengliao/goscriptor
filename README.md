@@ -1,7 +1,7 @@
 # Goscriptor — Zero-Dependency Redis Script Manager for Go
 
 [![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://go.dev/)
-![Status](https://img.shields.io/badge/status-v0.5.3--alpha-orange.svg)
+![Status](https://img.shields.io/badge/status-v1.0.0-brightgreen.svg)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![AI Generated](https://img.shields.io/badge/AI_Generated-Antigravity-blueviolet.svg)
@@ -49,13 +49,13 @@ func main() {
         "hello": `return 'Hello, World!'`,
     }
 
-    s, err := goscriptor.NewDB(opt, 1, "myapp|v1.0", scripts)
+    ctx := context.Background()
+    s, err := goscriptor.NewDB(ctx, opt, 1, "myapp|v1.0", scripts)
     if err != nil {
         log.Fatal(err)
     }
     defer s.Close()
 
-    ctx := context.Background()
     res, err := s.ExecSha(ctx, "hello", []string{})
     if err != nil {
         log.Fatal(err)
@@ -173,7 +173,11 @@ REDIS_ADDR=127.0.0.1:6379 go test -race ./...
 
 ## Changelog
 
-### v0.5.3-alpha
+### v1.0.0
+
+This is the first stable release. It contains breaking API changes from v0.5.x
+(ctx-aware constructors, `ErrEmptyScript`, narrowed exported surface) — hence the
+major version bump per Semantic Versioning.
 
 - **Connection pool overhaul**: Fixed data race on waiter list, lost wakeups, and
   `Close`/reaper synchronisation. `MinIdle` connections are now pre-warmed
@@ -195,7 +199,8 @@ REDIS_ADDR=127.0.0.1:6379 go test -race ./...
   integer-overflow checks. `WriteCommand` accepts `int32`, `int64`, `float32` (`f`
   notation), `float64`, `bool` (`"1"`/`"0"`); unsupported types return an error.
 - **TTL fixes**: `Set` floors sub-millisecond TTLs to 1 ms (PX); `Expire` rounds
-  sub-second durations up to 1 s (the old truncation silently deleted the key).
+  sub-second durations up to 1 s to avoid the truncation-to-zero that would silently
+  delete the key.
 - **script.go cleanup**: dead code removed, value sentinels added, real error
   propagation. SHA body verification: a changed body under the same name wins.
 - **Test de-flaking** and **GitHub Actions CI**: `gofmt`+`vet`+`build`+`go test -race`

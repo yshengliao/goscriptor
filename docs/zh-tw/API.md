@@ -23,28 +23,38 @@ type Scriptor struct {
 
 ```go
 type Option struct {
-    Host     string
-    Port     int
-    Password string
-    DB       int
-    PoolSize int
+    Host         string
+    Port         int
+    Password     string
+    DB           int
+    PoolSize     int           // 最大連線數（預設：10）
+    MinIdle      int           // 最小閒置連線數（預設：1）
+    DialTimeout  time.Duration // 預設：5s。0 = 預設，-1 = 停用
+    ReadTimeout  time.Duration // 預設：3s。0 = 預設，-1 = 停用
+    WriteTimeout time.Duration // 預設：3s。0 = 預設，-1 = 停用
+    IdleTimeout  time.Duration // 預設：5m。0 = 預設，-1 = 停用
+    MaxConnAge   time.Duration // 預設：30m。0 = 預設，-1 = 停用
 }
 ```
+
+`NewDB` 會驗證 `Host` 非空且 `Port` 在 1..65535 範圍內。
 
 ### 建構子
 
 #### `NewDB`
 
-使用 Option 建立新 Redis client 並初始化 Scriptor。
+使用 Option 建立新 Redis client 並初始化 Scriptor。傳入的 `ctx` 控制連線 Ping
+及初始腳本註冊的 deadline。
 
 ```go
-func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
+func NewDB(ctx context.Context, opt *Option, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
 ```
 
 **參數：**
 
 | 名稱 | 型別 | 說明 |
 |------|------|------|
+| `ctx` | `context.Context` | 控制啟動 Ping 及腳本註冊的 deadline |
 | `opt` | `*Option` | Redis 連線設定 |
 | `scriptDB` | `int` | 用於儲存腳本中繼資料的 Redis DB 編號 |
 | `redisScriptDefinition` | `string` | 儲存腳本 SHA1 對應的 Hash key 名稱 |
@@ -52,17 +62,18 @@ func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts map[
 
 #### `New`
 
-使用已存在的 Redis client 建立 Scriptor。
+使用已存在的 Redis client 建立 Scriptor。傳入的 `ctx` 控制連線 Ping
+及初始腳本註冊的 deadline。
 
 ```go
-func New(client *redis.Client, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
+func New(ctx context.Context, client *redis.Client, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
 ```
 
 ### 方法
 
 #### `Exec`
 
-直接執行 Lua 腳本（不使用快取）。若 `script` 為空字串，回傳 `ErrScriptNotFound`。
+直接執行 Lua 腳本（不使用快取）。若 `script` 為空字串，回傳 `ErrEmptyScript`。
 
 ```go
 func (s *Scriptor) Exec(ctx context.Context, script string, keys []string, args ...any) (any, error)
@@ -90,17 +101,20 @@ func (s *Scriptor) Close() error
 
 ```go
 var (
-    ErrNilClient      = errors.New("goscriptor: client cannot be nil")
-    ErrNilOption      = errors.New("goscriptor: option cannot be nil")
-    ErrScriptNotFound = errors.New("goscriptor: script not found")
-    ErrKeyNotFound    = errors.New("goscriptor: script key does not exist")
+    ErrNilClient       = errors.New("goscriptor: client cannot be nil")
+    ErrNilOption       = errors.New("goscriptor: option cannot be nil")
+    ErrScriptNotFound  = errors.New("goscriptor: script not found")
+    ErrEmptyScript     = errors.New("goscriptor: empty script")
+    ErrKeyNotFound     = errors.New("goscriptor: script key does not exist")
     ErrScriptNotCached = errors.New("goscriptor: script not in cache, reload required")
 )
 ```
 
-> **說明：** `ErrScriptNotCached` 由「從快取載入」路徑的 `ExecSha` 回傳——當
-> SHA1 已記錄於登錄檔但腳本已不在 Redis 腳本快取中時（例如 `SCRIPT FLUSH` 後，
-> 或 Scriptor 在未提供腳本內容的情況下建立後 Redis 重啟）。
+- `ErrEmptyScript` — `Exec("")` 傳入空 script body 時回傳。
+- `ErrScriptNotCached` — 由「從快取載入」路徑的 `ExecSha` 回傳：SHA1 已記錄於登錄檔
+  但腳本已不在 Redis 腳本快取中（例如 `SCRIPT FLUSH` 後，或 Scriptor 在未提供腳本
+  內容的情況下建立後 Redis 重啟）。若 Scriptor 建立時有提供腳本內容，`ExecSha` 會
+  自動重新載入腳本並重試一次（self-heal）。
 
 ---
 
@@ -212,9 +226,9 @@ func (c *Client) TTL(ctx context.Context, key string) (int64, error)
 ```
 
 **說明：**
-- `Expire`：TTL 轉換為整數秒（`int64(ttl.Seconds())`）。小於一秒的 duration
-  會截斷為 0——例如傳入 `900*time.Millisecond` 等同於傳入 0 秒，會移除 key 的過期設定。
-  若需毫秒精度，請改用帶 TTL 的 `Set`。
+- `Expire`：由於 `EXPIRE` 僅接受整數秒，小於一秒的 TTL 會向上取整到 1 秒。例如傳入
+  `900*time.Millisecond` 會以 1 秒送出，保留 key 而不是刪除它。若 `ttl <= 0` 則
+  直接傳遞給 Redis（立即刪除 key）。若需毫秒精度，請改用帶 TTL 的 `Set`。
 
 ### Script 指令
 

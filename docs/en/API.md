@@ -25,28 +25,38 @@ Convenience configuration using separate host and port.
 
 ```go
 type Option struct {
-    Host     string
-    Port     int
-    Password string
-    DB       int
-    PoolSize int
+    Host         string
+    Port         int
+    Password     string
+    DB           int
+    PoolSize     int           // Max connections (default: 10)
+    MinIdle      int           // Min idle connections (default: 1)
+    DialTimeout  time.Duration // Default: 5s. 0 = default, -1 = disable
+    ReadTimeout  time.Duration // Default: 3s. 0 = default, -1 = disable
+    WriteTimeout time.Duration // Default: 3s. 0 = default, -1 = disable
+    IdleTimeout  time.Duration // Default: 5m. 0 = default, -1 = disable
+    MaxConnAge   time.Duration // Default: 30m. 0 = default, -1 = disable
 }
 ```
+
+`NewDB` validates that `Host` is non-empty and `Port` is in the range 1..65535.
 
 ### Constructors
 
 #### `NewDB`
 
-Creates a Scriptor with a new Redis client from Option.
+Creates a Scriptor with a new Redis client from Option. The supplied `ctx`
+governs the connectivity Ping and the initial script registration.
 
 ```go
-func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
+func NewDB(ctx context.Context, opt *Option, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
 ```
 
 **Parameters:**
 
 | Name | Type | Description |
 |------|------|-------------|
+| `ctx` | `context.Context` | Controls the startup Ping and script registration deadline |
 | `opt` | `*Option` | Redis connection settings |
 | `scriptDB` | `int` | Redis DB number for script metadata storage |
 | `redisScriptDefinition` | `string` | Hash key for storing script SHA1 mappings |
@@ -54,17 +64,18 @@ func NewDB(opt *Option, scriptDB int, redisScriptDefinition string, scripts map[
 
 #### `New`
 
-Creates a Scriptor with an existing Redis client.
+Creates a Scriptor with an existing Redis client. The supplied `ctx` governs
+the connectivity Ping and the initial script registration.
 
 ```go
-func New(client *redis.Client, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
+func New(ctx context.Context, client *redis.Client, scriptDB int, redisScriptDefinition string, scripts map[string]string) (*Scriptor, error)
 ```
 
 ### Methods
 
 #### `Exec`
 
-Executes a Lua script directly (not cached). Returns `ErrScriptNotFound` if
+Executes a Lua script directly (not cached). Returns `ErrEmptyScript` if
 `script` is empty.
 
 ```go
@@ -94,18 +105,21 @@ All sentinel errors are defined in `errors.go`:
 
 ```go
 var (
-    ErrNilClient      = errors.New("goscriptor: client cannot be nil")
-    ErrNilOption      = errors.New("goscriptor: option cannot be nil")
-    ErrScriptNotFound = errors.New("goscriptor: script not found")
-    ErrKeyNotFound    = errors.New("goscriptor: script key does not exist")
+    ErrNilClient       = errors.New("goscriptor: client cannot be nil")
+    ErrNilOption       = errors.New("goscriptor: option cannot be nil")
+    ErrScriptNotFound  = errors.New("goscriptor: script not found")
+    ErrEmptyScript     = errors.New("goscriptor: empty script")
+    ErrKeyNotFound     = errors.New("goscriptor: script key does not exist")
     ErrScriptNotCached = errors.New("goscriptor: script not in cache, reload required")
 )
 ```
 
-> **Note:** `ErrScriptNotCached` is returned by `ExecSha` (via the load-from-cache
-> path) when the SHA1 is recorded in the registry but the script is no longer in the
-> Redis script cache (e.g. after `SCRIPT FLUSH` or a Redis restart when the Scriptor
-> was built without providing script bodies).
+- `ErrEmptyScript` — returned by `Exec("")` when the script body is empty.
+- `ErrScriptNotCached` — returned by `ExecSha` (via the load-from-cache path) when
+  the SHA1 is recorded in the registry but the script is no longer in the Redis
+  script cache (e.g. after `SCRIPT FLUSH` or a Redis restart when the Scriptor was
+  built without providing script bodies). When the Scriptor was built with explicit
+  script bodies, `ExecSha` self-heals by reloading the script and retrying once.
 
 ---
 
@@ -221,9 +235,10 @@ func (c *Client) TTL(ctx context.Context, key string) (int64, error)
 ```
 
 **Notes:**
-- `Expire`: the TTL is converted to whole seconds (`int64(ttl.Seconds())`).
-  Sub-second durations truncate toward zero — passing e.g. `900*time.Millisecond`
-  becomes 0 seconds and effectively removes the key's expiry. For sub-second
+- `Expire`: because `EXPIRE` accepts whole seconds, sub-second TTLs are rounded
+  **up** to 1 second. For example, `900*time.Millisecond` is sent as 1 second,
+  preserving the key rather than deleting it. If `ttl <= 0` the value is passed
+  through to Redis unchanged (which immediately deletes the key). For sub-second
   precision use `Set` with a millisecond TTL instead.
 
 ### Script Commands

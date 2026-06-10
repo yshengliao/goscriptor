@@ -1,7 +1,7 @@
 # Goscriptor — 零依賴 Redis 腳本管理器
 
 [![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://go.dev/)
-![Status](https://img.shields.io/badge/status-v0.5.3--alpha-orange.svg)
+![Status](https://img.shields.io/badge/status-v1.0.0-brightgreen.svg)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![AI Generated](https://img.shields.io/badge/AI_Generated-Antigravity-blueviolet.svg)
@@ -49,13 +49,13 @@ func main() {
         "hello": `return 'Hello, World!'`,
     }
 
-    s, err := goscriptor.NewDB(opt, 1, "myapp|v1.0", scripts)
+    ctx := context.Background()
+    s, err := goscriptor.NewDB(ctx, opt, 1, "myapp|v1.0", scripts)
     if err != nil {
         log.Fatal(err)
     }
     defer s.Close()
 
-    ctx := context.Background()
     res, err := s.ExecSha(ctx, "hello", []string{})
     if err != nil {
         log.Fatal(err)
@@ -172,7 +172,10 @@ REDIS_ADDR=127.0.0.1:6379 go test -race ./...
 
 ## 變更紀錄
 
-### v0.5.3-alpha
+### v1.0.0
+
+這是第一個穩定版本。此版本相較於 v0.5.x 包含破壞性 API 變更（ctx-aware 建構子、
+`ErrEmptyScript`、縮小匯出介面）——依語意化版本規範因此升級主版本號。
 
 - **連線池全面翻修**：修正 waiter 清單的資料競爭、喚醒遺漏問題，以及 `Close`/reaper
   的同步問題。`MinIdle` 連線現在在 client 建立時非同步預熱，並由背景 reaper 每 30 秒
@@ -192,7 +195,7 @@ REDIS_ADDR=127.0.0.1:6379 go test -race ./...
   `WriteCommand` 支援 `int32`、`int64`、`float32`（`f` 記法）、`float64`、
   `bool`（`"1"`/`"0"`）；不支援的型別回傳錯誤。
 - **TTL 修復**：`Set` 將小於毫秒的 TTL 向上取整到 1 ms（PX）；`Expire` 將小於秒的
-  duration 向上取整到 1 s（舊的截斷行為會靜默刪除 key）。
+  duration 向上取整到 1 s，以避免截斷為零導致靜默刪除 key。
 - **script.go 清理**：移除死碼、加入值 sentinel、修正錯誤傳遞。SHA body 驗證：
   相同名稱下若 body 已變更，以新 body 為準。
 - **測試去除抖動**及 **GitHub Actions CI**：`gofmt`+`vet`+`build`+`go test -race`
