@@ -540,20 +540,14 @@ func TestClient_PoolWaiterContextCancel(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Hold the only connection with a slow Lua script
+	// Hold the only connection with a server-side blocking command. BLPOP keeps
+	// this connection occupied for ~300ms without busying the Redis event loop
+	// (a Lua busy-wait cannot work here: the script clock is frozen during
+	// execution, turning a timed loop into an infinite one that stalls the
+	// whole server).
 	hold := make(chan struct{})
 	go func() {
-		// This Lua busy-waits for ~200ms, keeping the connection occupied
-		c.Eval(ctx, `
-			local t = redis.call('TIME')
-			local start = tonumber(t[1]) * 1000000 + tonumber(t[2])
-			while true do
-				local now = redis.call('TIME')
-				local cur = tonumber(now[1]) * 1000000 + tonumber(now[2])
-				if cur - start > 200000 then break end
-			end
-			return 'done'
-		`, nil)
+		c.Do(ctx, "BLPOP", "goscriptor:test:pool-waiter:absent", "0.3")
 		close(hold)
 	}()
 
