@@ -1,8 +1,8 @@
 package redis_test
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -626,4 +626,3 @@ func TestClient_WrongPassword(t *testing.T) {
 		t.Fatal("expected auth error")
 	}
 }
-

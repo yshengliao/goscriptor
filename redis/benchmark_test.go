@@ -2,9 +2,9 @@ package redis_test
 
 import (
 	"context"
+	"github.com/yshengliao/goscriptor/redis"
 	"os"
 	"testing"
-	"github.com/yshengliao/goscriptor/redis"
 )
 
 func BenchmarkPing(b *testing.B) {
