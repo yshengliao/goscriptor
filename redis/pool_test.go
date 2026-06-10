@@ -514,3 +514,87 @@ func TestPool_CtxDeadlineOnSocket(t *testing.T) {
 		t.Fatalf("Do took %v, ctx deadline (100ms) not applied to socket", elapsed)
 	}
 }
+
+// TestPool_AbandonForwardsRetrySignal pins the rule that a cancelling waiter
+// which consumed a nil retry-signal must forward it to the next waiter:
+// otherwise the freed-slot notification dies with the canceller and the
+// remaining waiters sleep until their own deadlines.
+func TestPool_AbandonForwardsRetrySignal(t *testing.T) {
+	fs := newFakeServer(t, nil)
+	defer fs.close()
+
+	c := NewClient(&Options{Addr: fs.addr(), PoolSize: 1, MinIdle: 1})
+	defer c.Close()
+
+	// Let the async warm-up settle so it cannot interact with the manual
+	// waiter queue below.
+	if !waitFor(time.Second, func() bool { return c.PoolStats().Active == 1 }) {
+		t.Fatal("warm-up did not settle")
+	}
+
+	w1 := make(chan *conn, 1)
+	w2 := make(chan *conn, 1)
+	c.mu.Lock()
+	c.waiters = []chan *conn{w1, w2}
+	// Simulate a freed slot waking the head waiter (w1).
+	c.wakeOneWaiterLocked()
+	c.mu.Unlock()
+
+	// w1 "cancelled" after it was dequeued: abandonWaiter must drain the
+	// retry signal and forward it to w2.
+	if err := c.abandonWaiter(w1, context.Canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("abandonWaiter returned %v, want context.Canceled", err)
+	}
+
+	select {
+	case cn, ok := <-w2:
+		if !ok || cn != nil {
+			t.Fatalf("w2 received (cn=%v, ok=%v), want forwarded nil retry signal", cn, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry signal was not forwarded to the next waiter")
+	}
+}
+
+// TestPool_DialIdleFailureWakesWaiter pins the rule that a failed warm-up /
+// replenish dial must wake a waiter: the reserved slot made a concurrent
+// caller enqueue itself, and without a wakeup it would sleep until its ctx
+// deadline even though capacity is free again.
+func TestPool_DialIdleFailureWakesWaiter(t *testing.T) {
+	// An address that refuses connections immediately: listen, grab the
+	// port, close the listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	c := NewClient(&Options{Addr: addr, PoolSize: 1, MinIdle: 1})
+	defer c.Close()
+
+	// Let the (failing) warm-up settle before installing the manual waiter.
+	time.Sleep(100 * time.Millisecond)
+
+	w := make(chan *conn, 1)
+	c.mu.Lock()
+	c.waiters = []chan *conn{w}
+	c.mu.Unlock()
+
+	if ok := c.dialIdle(context.Background()); ok {
+		t.Fatal("dialIdle against a refused address reported success")
+	}
+
+	select {
+	case cn, ok := <-w:
+		if !ok || cn != nil {
+			t.Fatalf("waiter received (cn=%v, ok=%v), want nil retry signal", cn, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed dialIdle did not wake the queued waiter")
+	}
+
+	if got := c.PoolStats().Active; got != 0 {
+		t.Fatalf("active = %d after failed dial, want 0", got)
+	}
+}

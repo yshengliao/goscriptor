@@ -218,8 +218,12 @@ func (c *Client) dialIdle(ctx context.Context) bool {
 
 	cn, err := c.dialConn(ctx)
 	if err != nil {
+		// Release the reserved slot AND wake one waiter: a caller may have
+		// enqueued itself while this slot was reserved, and without a wakeup
+		// it would sleep until its ctx deadline even though capacity is free.
 		c.mu.Lock()
 		c.active--
+		c.wakeOneWaiterLocked()
 		c.mu.Unlock()
 		return false
 	}
@@ -353,6 +357,15 @@ func (c *Client) dialConn(ctx context.Context) (*conn, error) {
 	return cn, nil
 }
 
+// wakeOneWaiterLocked hands a nil retry-signal to the head waiter, if any,
+// telling it a slot was freed so it can re-attempt the acquire loop. Callers
+// must hold c.mu.
+func (c *Client) wakeOneWaiterLocked() {
+	if w := c.popWaiterLocked(); w != nil {
+		w <- nil
+	}
+}
+
 // popWaiterLocked removes and returns the head waiter, or nil if none. Callers
 // must hold c.mu. The returned channel has capacity 1 and receives at most one
 // send over its lifetime, so sending on it under the lock never blocks.
@@ -419,9 +432,7 @@ func (c *Client) getConn(ctx context.Context) (*conn, error) {
 				// slot never goes unnoticed (lost-wakeup guard).
 				c.mu.Lock()
 				c.active--
-				if w := c.popWaiterLocked(); w != nil {
-					w <- nil // retry signal
-				}
+				c.wakeOneWaiterLocked()
 				c.mu.Unlock()
 				return nil, err
 			}
@@ -472,11 +483,19 @@ func (c *Client) abandonWaiter(ch chan *conn, ctxErr error) error {
 	// Not in the queue: a send or close already happened-before this point.
 	select {
 	case cn, ok := <-ch:
-		if ok && cn != nil {
+		switch {
+		case ok && cn != nil:
 			c.putConn(cn) // reclaim the connection we will not use
+		case ok && cn == nil:
+			// We consumed a retry signal we will not act on. Forward it so
+			// the freed slot is never lost on the remaining waiters.
+			c.mu.Lock()
+			if !c.closed.Load() {
+				c.wakeOneWaiterLocked()
+			}
+			c.mu.Unlock()
 		}
-		// ok && cn == nil: retry signal, nothing to reclaim.
-		// !ok: channel closed by Close, nothing to reclaim.
+		// !ok: channel closed by Close, nothing to reclaim or forward.
 	default:
 		// Unreachable given the atomic dequeue+send invariant; kept as a
 		// safety net so a missed signal can never panic or block.
@@ -528,9 +547,7 @@ func (c *Client) removeConn(cn *conn) {
 	c.mu.Lock()
 	c.active--
 	if !c.closed.Load() {
-		if w := c.popWaiterLocked(); w != nil {
-			w <- nil // retry signal
-		}
+		c.wakeOneWaiterLocked()
 	}
 	c.mu.Unlock()
 	cn.nc.Close()
