@@ -27,6 +27,19 @@ func redisAddr(t *testing.T) string {
 	return addr
 }
 
+// waitPool polls the client's pool stats until cond holds or timeout elapses,
+// returning the final evaluation of cond.
+func waitPool(c *redis.Client, timeout time.Duration, cond func(redis.PoolStats) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond(c.PoolStats()) {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return cond(c.PoolStats())
+}
+
 // newTestClient creates a test client. When key names are provided they are
 // prefixed with "goscriptor_test:" and deleted both immediately (to ensure a
 // clean starting state) and again on cleanup (to leave Redis tidy).
@@ -539,24 +552,30 @@ func TestClient_PoolExhaustion(t *testing.T) {
 	helper.Del(context.Background(), holderKey)
 	defer helper.Del(context.Background(), holderKey)
 
-	// Hold the only connection with a blocking BLPOP.
+	// Settle the async MinIdle warm-up first: with PoolSize 1, polling
+	// Active==1 && Idle==0 alone can be satisfied by an in-flight warm-up
+	// dial (slot reserved, conn not yet parked), in which case the holder
+	// does not actually own the connection yet.
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("settle ping: %v", err)
+	}
+	if !waitPool(c, 2*time.Second, func(s redis.PoolStats) bool {
+		return s.Active == 1 && s.Idle == 1 && s.Waiters == 0
+	}) {
+		t.Fatalf("pool never settled after warm-up: %+v", c.PoolStats())
+	}
+
+	// Hold the only connection with a blocking BLPOP. The holder is now the
+	// only actor that can pop the parked conn, so Idle==0 means it owns it.
 	holderDone := make(chan error, 1)
 	go func() {
 		_, err := c.Do(ctx, "BLPOP", holderKey, "5")
 		holderDone <- err
 	}()
-
-	// Poll until the pool shows Active=1, Idle=0, Waiters=0 (holder owns it).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s := c.PoolStats()
-		if s.Active == 1 && s.Idle == 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if s := c.PoolStats(); !(s.Active == 1 && s.Idle == 0) {
-		t.Fatalf("holder never took the connection: %+v", s)
+	if !waitPool(c, 2*time.Second, func(s redis.PoolStats) bool {
+		return s.Active == 1 && s.Idle == 0
+	}) {
+		t.Fatalf("holder never took the connection: %+v", c.PoolStats())
 	}
 
 	// Second concurrent request should queue as a waiter.
@@ -565,16 +584,9 @@ func TestClient_PoolExhaustion(t *testing.T) {
 		_, err := c.Do(ctx, "PING")
 		waitDone <- err
 	}()
-
-	// Poll until there is a waiter.
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.PoolStats().Waiters == 1 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if c.PoolStats().Waiters != 1 {
+	if !waitPool(c, 2*time.Second, func(s redis.PoolStats) bool {
+		return s.Waiters == 1
+	}) {
 		t.Fatalf("waiter never queued: %+v", c.PoolStats())
 	}
 
@@ -612,6 +624,18 @@ func TestClient_PoolWaiterContextCancel(t *testing.T) {
 	helper.Del(context.Background(), holderKey)
 	defer helper.Del(context.Background(), holderKey)
 
+	// Settle the async MinIdle warm-up first so that Active==1 && Idle==0
+	// below can only mean "the holder owns the connection" (an in-flight
+	// warm-up dial also reads as Active==1/Idle==0).
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("settle ping: %v", err)
+	}
+	if !waitPool(c, 2*time.Second, func(s redis.PoolStats) bool {
+		return s.Active == 1 && s.Idle == 1 && s.Waiters == 0
+	}) {
+		t.Fatalf("pool never settled after warm-up: %+v", c.PoolStats())
+	}
+
 	// Hold the only connection with a server-side blocking command. BLPOP keeps
 	// this connection occupied without busying the Redis event loop.
 	hold := make(chan struct{})
@@ -619,19 +643,10 @@ func TestClient_PoolWaiterContextCancel(t *testing.T) {
 		c.Do(ctx, "BLPOP", holderKey, "5")
 		close(hold)
 	}()
-
-	// Poll until Active=1, Idle=0 so the holder owns the connection before we
-	// issue the short-ctx call.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s := c.PoolStats()
-		if s.Active == 1 && s.Idle == 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if s := c.PoolStats(); !(s.Active == 1 && s.Idle == 0) {
-		t.Fatalf("holder never took the connection: %+v", s)
+	if !waitPool(c, 2*time.Second, func(s redis.PoolStats) bool {
+		return s.Active == 1 && s.Idle == 0
+	}) {
+		t.Fatalf("holder never took the connection: %+v", c.PoolStats())
 	}
 
 	shortCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)

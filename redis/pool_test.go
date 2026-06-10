@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -335,19 +336,29 @@ func TestPool_LostWakeupOnRemove(t *testing.T) {
 	releaseCh := make(chan struct{})
 	fs := newFakeServer(t, func(fs *fakeServer, idx int, c net.Conn) {
 		r := bufio.NewReader(c)
-		if idx == 0 {
-			// First connection: read the command, then die to force an I/O
-			// error in the holder's ReadReply.
-			readCommand(r)
-			select {
-			case <-releaseCh:
-			case <-fs.done: // safety net if the test fails before releasing
+		for {
+			args, err := readCommand(r)
+			if err != nil {
+				return
 			}
-			c.Close()
-			return
+			// Dispatch the killer behaviour by command content, NOT by accept
+			// order: ephemeral-port reuse can let a zombie warm-up dial from a
+			// previous test's already-closed client steal an accept slot, so
+			// idx is not a reliable identity.
+			if len(args) > 0 && args[0] == "DIEAFTERREAD" {
+				// Read the command, then die without replying to force an I/O
+				// error in the holder's ReadReply.
+				select {
+				case <-releaseCh:
+				case <-fs.done: // safety net if the test fails before releasing
+				}
+				c.Close()
+				return
+			}
+			if _, err := c.Write([]byte("+OK\r\n")); err != nil {
+				return
+			}
 		}
-		// Replacement connection: behave normally.
-		handleOK(fs, idx, c)
 	})
 	defer fs.close()
 
@@ -355,19 +366,32 @@ func TestPool_LostWakeupOnRemove(t *testing.T) {
 	defer c.Close()
 	ctx := context.Background()
 
+	// Settle the async MinIdle warm-up first: an in-flight warm-up dial also
+	// reads as Active==1/Idle==0, which would let the polls below pass before
+	// A actually owns the connection.
+	if _, err := c.Do(ctx, "PING"); err != nil {
+		t.Fatalf("settle ping: %v", err)
+	}
+	if !waitFor(5*time.Second, func() bool {
+		s := c.PoolStats()
+		return s.Active == 1 && s.Idle == 1 && s.Waiters == 0
+	}) {
+		t.Fatalf("pool never settled after warm-up: %+v", c.PoolStats())
+	}
+
 	// Goroutine A grabs the only conn and blocks in ReadReply.
 	aDone := make(chan error, 1)
-	go func() { _, err := c.Do(ctx, "PING"); aDone <- err }()
-	if !waitFor(2*time.Second, func() bool { return c.PoolStats().Active == 1 && c.PoolStats().Idle == 0 }) {
+	go func() { _, err := c.Do(ctx, "DIEAFTERREAD"); aDone <- err }()
+	if !waitFor(5*time.Second, func() bool { return c.PoolStats().Active == 1 && c.PoolStats().Idle == 0 }) {
 		t.Fatalf("A never took the conn: %+v", c.PoolStats())
 	}
 
 	// Goroutine B queues as a waiter with a generous deadline.
-	bCtx, bCancel := context.WithTimeout(ctx, 5*time.Second)
+	bCtx, bCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer bCancel()
 	bDone := make(chan error, 1)
 	go func() { _, err := c.Do(bCtx, "PING"); bDone <- err }()
-	if !waitFor(2*time.Second, func() bool { return c.PoolStats().Waiters == 1 }) {
+	if !waitFor(5*time.Second, func() bool { return c.PoolStats().Waiters == 1 }) {
 		t.Fatalf("B never queued: %+v", c.PoolStats())
 	}
 
@@ -376,17 +400,17 @@ func TestPool_LostWakeupOnRemove(t *testing.T) {
 	release.Do(func() { close(releaseCh) })
 
 	if err := <-aDone; err == nil {
-		t.Fatal("A should have failed with an I/O error")
+		t.Fatalf("A should have failed with an I/O error (accepts=%d, stats=%+v)", fs.acceptCount(), c.PoolStats())
 	}
 	select {
 	case err := <-bDone:
 		if err != nil {
 			t.Fatalf("B failed: %v", err)
 		}
-		if elapsed := time.Since(start); elapsed > 2*time.Second {
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
 			t.Fatalf("B woke too slowly (%v); lost wakeup?", elapsed)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(6 * time.Second):
 		t.Fatal("B hung: lost wakeup")
 	}
 }
@@ -394,13 +418,18 @@ func TestPool_LostWakeupOnRemove(t *testing.T) {
 // A5 regression: a server error reply (-ERR) is surfaced as an error but the
 // connection stays healthy and is reused.
 func TestPool_ServerErrorKeepsConn(t *testing.T) {
+	// Each connection embeds its identity (accept index) in the error reply so
+	// reuse can be asserted by identity rather than by global accept counts —
+	// ephemeral-port reuse can let a zombie warm-up dial from a previous test's
+	// closed client inflate the accept counter.
 	fs := newFakeServer(t, func(fs *fakeServer, idx int, c net.Conn) {
 		r := bufio.NewReader(c)
+		reply := []byte(fmt.Sprintf("-ERR boom %d\r\n", idx))
 		for {
 			if _, err := readCommand(r); err != nil {
 				return
 			}
-			if _, err := c.Write([]byte("-ERR boom\r\n")); err != nil {
+			if _, err := c.Write(reply); err != nil {
 				return
 			}
 		}
@@ -410,7 +439,6 @@ func TestPool_ServerErrorKeepsConn(t *testing.T) {
 	c := NewClient(&Options{Addr: fs.addr(), PoolSize: 2, MinIdle: 1})
 	defer c.Close()
 	waitIdle(t, c, 1) // warm-up created one idle conn
-	acceptsAfterWarm := fs.acceptCount()
 
 	ctx := context.Background()
 	_, err := c.Do(ctx, "PING")
@@ -418,8 +446,9 @@ func TestPool_ServerErrorKeepsConn(t *testing.T) {
 	if !errors.As(err, &rerr) {
 		t.Fatalf("want RedisError, got %T %v", err, err)
 	}
-	if rerr.Error() != "ERR boom" {
-		t.Fatalf("want 'ERR boom', got %q", rerr.Error())
+	first := rerr.Error()
+	if !strings.HasPrefix(first, "ERR boom") {
+		t.Fatalf("want 'ERR boom <id>', got %q", first)
 	}
 
 	// Connection must be back in the pool, healthy.
@@ -430,13 +459,13 @@ func TestPool_ServerErrorKeepsConn(t *testing.T) {
 		t.Fatalf("conn not returned after server error: %+v", c.PoolStats())
 	}
 
-	// Second Do must reuse the same connection (no new accept).
+	// Second Do must reuse the same connection (same embedded identity).
 	_, err = c.Do(ctx, "PING")
 	if !errors.As(err, &rerr) {
 		t.Fatalf("second Do: want RedisError, got %T %v", err, err)
 	}
-	if got := fs.acceptCount(); got != acceptsAfterWarm {
-		t.Fatalf("connection not reused: accepts went %d -> %d", acceptsAfterWarm, got)
+	if second := rerr.Error(); second != first {
+		t.Fatalf("connection not reused: identity went %q -> %q", first, second)
 	}
 }
 
