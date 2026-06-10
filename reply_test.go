@@ -332,3 +332,107 @@ func TestRedisArrayReplyReader_ForEach_Error(t *testing.T) {
 	}
 }
 
+// TestRedisReplyValue_AsInt64_HighPrecision verifies that integer strings above 2^53
+// are parsed exactly (not via float64 which would lose precision).
+func TestRedisReplyValue_AsInt64_HighPrecision(t *testing.T) {
+	// 9007199254740995 == 2^53 + 3; float64 cannot represent it exactly.
+	const bigStr = "9007199254740995"
+	const want int64 = 9007199254740995
+	v := goscriptor.NewRedisReplyValue(bigStr)
+	got, err := v.AsInt64(0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %d, got %d", want, got)
+	}
+}
+
+// TestRedisReplyValue_AsInt32_HighPrecision verifies that an integer beyond float32
+// precision is still parsed exactly.
+func TestRedisReplyValue_AsInt32_HighPrecision(t *testing.T) {
+	// 16777217 == 2^24 + 1; float32 cannot represent it exactly.
+	const input = "16777217"
+	const want int32 = 16777217
+	v := goscriptor.NewRedisReplyValue(input)
+	got, err := v.AsInt32(0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %d, got %d", want, got)
+	}
+}
+
+// TestRedisReplyValue_AsString_Float verifies float64 formatting in AsString.
+func TestRedisReplyValue_AsString_Float(t *testing.T) {
+	v := goscriptor.NewRedisReplyValue(float64(3.14))
+	s := v.AsString()
+	if s != "3.14" {
+		t.Fatalf("expected \"3.14\", got %q", s)
+	}
+
+	// Large float must use 'f' notation, not scientific notation.
+	v2 := goscriptor.NewRedisReplyValue(float64(1e20))
+	s2 := v2.AsString()
+	if s2 != "100000000000000000000" {
+		t.Fatalf("expected decimal notation, got %q", s2)
+	}
+}
+
+// TestRedisArrayReplyReader_ForEach_Cursor verifies that ForEach starts from the
+// current cursor position (not position 0) after ReadValue has consumed items.
+func TestRedisArrayReplyReader_ForEach_Cursor(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"x", "y", "z"})
+
+	// Consume the first two items.
+	r.ReadValue() // index 0
+	r.ReadValue() // index 1
+
+	// ForEach should only see the remaining item at absolute index 2.
+	var indices []int
+	var values []string
+	err := r.ForEach(func(i int, v *goscriptor.RedisReplyValue) error {
+		indices = append(indices, i)
+		values = append(values, v.AsString())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("expected 1 remaining item, got %d: %v", len(values), values)
+	}
+	if values[0] != "z" {
+		t.Fatalf("expected \"z\", got %q", values[0])
+	}
+	if indices[0] != 2 {
+		t.Fatalf("expected absolute index 2, got %d", indices[0])
+	}
+}
+
+// TestRedisArrayReplyReader_OverRead_Fresh verifies that over-reading returns a fresh
+// nil-valued reply that does not affect GetLength.
+func TestRedisArrayReplyReader_OverRead_Fresh(t *testing.T) {
+	r := goscriptor.NewRedisArrayReplyReader([]any{"only"})
+	r.ReadValue() // consume
+
+	v1 := r.ReadValue()
+	if !v1.IsNil() {
+		t.Fatal("over-read should return IsNil() == true")
+	}
+	v2 := r.ReadValue()
+	if !v2.IsNil() {
+		t.Fatal("second over-read should return IsNil() == true")
+	}
+
+	// GetLength must still reflect the original array length.
+	if r.GetLength() != 1 {
+		t.Fatalf("GetLength should remain 1 after over-reads, got %d", r.GetLength())
+	}
+
+	// Returned values are fresh (not the exported singleton), but IsNil must hold.
+	if v1 == goscriptor.EmptyRedisReplyValue {
+		t.Fatal("over-read should return a fresh value, not the shared EmptyRedisReplyValue singleton")
+	}
+}

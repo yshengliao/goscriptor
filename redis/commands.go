@@ -8,7 +8,10 @@ import (
 
 // --- String commands ---
 
-// Get returns the value of key, or empty string if key does not exist.
+// Get returns the value of key, or ("", nil) if the key does not exist.
+//
+// WARNING: a missing key and a key holding an empty string are indistinguishable
+// — both return ("", nil). Use Exists to tell them apart when the distinction matters.
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	reply, err := c.Do(ctx, "GET", key)
 	if err != nil {
@@ -24,10 +27,16 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	return s, nil
 }
 
-// Set sets key to value. If ttl > 0, sets an expiry.
+// Set sets key to value. If ttl > 0, sets an expiry using PX (millisecond precision).
+//
+// Sub-millisecond TTLs are floored to 1 ms to avoid sending "PX 0", which Redis
+// rejects. If you need sub-millisecond precision, consider SET with EXAT/PXAT.
 func (c *Client) Set(ctx context.Context, key, value string, ttl time.Duration) error {
 	if ttl > 0 {
 		ms := ttl.Milliseconds()
+		if ms <= 0 {
+			ms = 1
+		}
 		_, err := c.Do(ctx, "SET", key, value, "PX", ms)
 		return err
 	}
@@ -100,8 +109,22 @@ func (c *Client) IncrBy(ctx context.Context, key string, delta int64) (int64, er
 // --- Key commands ---
 
 // Expire sets a timeout on key. Returns true if the timeout was set.
+//
+// Because EXPIRE accepts whole seconds, sub-second TTLs are rounded UP to 1 second
+// to avoid accidental data loss: passing ttl < 1s would otherwise truncate to 0,
+// and "EXPIRE key 0" immediately deletes the key.
+//
+// If ttl <= 0 the value is passed through unchanged, which causes Redis to delete
+// the key immediately — this is intentional (matches plain EXPIRE semantics) but
+// callers should be aware.
 func (c *Client) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	secs := int64(ttl.Seconds())
+	var secs int64
+	if ttl > 0 {
+		// Round up to avoid truncating sub-second TTLs to 0 (which deletes the key).
+		secs = int64((ttl + time.Second - 1) / time.Second)
+	} else {
+		secs = int64(ttl.Seconds())
+	}
 	reply, err := c.Do(ctx, "EXPIRE", key, secs)
 	if err != nil {
 		return false, err
@@ -135,7 +158,10 @@ func (c *Client) HSet(ctx context.Context, key, field, value string) error {
 	return err
 }
 
-// HGet returns the value of field in hash key.
+// HGet returns the value of field in hash key, or ("", nil) if the key or field does not exist.
+//
+// WARNING: a missing field and a field holding an empty string are indistinguishable
+// — both return ("", nil). Use HExists to tell them apart when the distinction matters.
 func (c *Client) HGet(ctx context.Context, key, field string) (string, error) {
 	reply, err := c.Do(ctx, "HGET", key, field)
 	if err != nil {
@@ -242,7 +268,10 @@ func (c *Client) RPush(ctx context.Context, key string, values ...string) (int64
 	return n, nil
 }
 
-// LPop removes and returns the first element of a list.
+// LPop removes and returns the first element of a list, or ("", nil) if the list is empty or the key does not exist.
+//
+// WARNING: a missing/empty list and a list whose first element is an empty string are
+// indistinguishable — both return ("", nil). Use Exists or LLen when the distinction matters.
 func (c *Client) LPop(ctx context.Context, key string) (string, error) {
 	reply, err := c.Do(ctx, "LPOP", key)
 	if err != nil {
@@ -258,7 +287,10 @@ func (c *Client) LPop(ctx context.Context, key string) (string, error) {
 	return s, nil
 }
 
-// RPop removes and returns the last element of a list.
+// RPop removes and returns the last element of a list, or ("", nil) if the list is empty or the key does not exist.
+//
+// WARNING: a missing/empty list and a list whose last element is an empty string are
+// indistinguishable — both return ("", nil). Use Exists or LLen when the distinction matters.
 func (c *Client) RPop(ctx context.Context, key string) (string, error) {
 	reply, err := c.Do(ctx, "RPOP", key)
 	if err != nil {
