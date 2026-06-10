@@ -3,6 +3,7 @@ package redis
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -19,6 +20,12 @@ const (
 	defaultMaxConnAge   = 30 * time.Minute
 	defaultReadTimeout  = 3 * time.Second
 	defaultWriteTimeout = 3 * time.Second
+
+	// reaperInterval is how often the background reaper runs. Besides reaping
+	// stale connections it replenishes idle connections up to MinIdle; on a
+	// dial failure it stops that cycle and the next tick acts as the natural
+	// backoff.
+	reaperInterval = 30 * time.Second
 )
 
 // Options configures a Redis client.
@@ -32,6 +39,9 @@ type Options struct {
 	PoolSize int
 
 	// MinIdle is the minimum number of idle connections to keep alive.
+	// The client pre-warms up to MinIdle connections asynchronously after
+	// NewClient returns and the background reaper replenishes idle
+	// connections back up to MinIdle (bounded by PoolSize) on every tick.
 	// Default: 1.
 	MinIdle int
 
@@ -39,11 +49,17 @@ type Options struct {
 	// Default: 5s.
 	DialTimeout time.Duration
 
-	// ReadTimeout is the per-command read deadline.
+	// ReadTimeout is the per-command read deadline. The effective read
+	// deadline is the earlier of (now + ReadTimeout) and the caller ctx
+	// deadline, if any. When set to -1 (disabled) only the ctx deadline
+	// applies.
 	// Default: 3s. Set to -1 to disable.
 	ReadTimeout time.Duration
 
-	// WriteTimeout is the per-command write deadline.
+	// WriteTimeout is the per-command write deadline. The effective write
+	// deadline is the earlier of (now + WriteTimeout) and the caller ctx
+	// deadline, if any. When set to -1 (disabled) only the ctx deadline
+	// applies.
 	// Default: 3s. Set to -1 to disable.
 	WriteTimeout time.Duration
 
@@ -118,16 +134,25 @@ func (o *Options) maxConnAge() time.Duration {
 	return defaultMaxConnAge
 }
 
+// errClosed is returned when an operation is attempted on a closed client.
+var errClosed = errors.New("redis: client is closed")
+
 // Client is a minimal Redis client that speaks RESP2.
+//
+// All mutable pool state (pool, active, waiters) is guarded by mu. The closed
+// flag is an atomic.Bool for cheap fast-path checks, but every state
+// transition that depends on it re-consults it under mu.
 type Client struct {
 	opts *Options
 
-	mu       sync.Mutex
-	pool     []*conn
-	active   int32 // total connections (pooled + in-use)
-	closed   atomic.Bool
-	waiters  []chan *conn // goroutines waiting for a connection
-	closedCh chan struct{}
+	mu      sync.Mutex
+	pool    []*conn      // idle connections, used LIFO
+	active  int          // total connections (idle + in-use), guarded by mu
+	waiters []chan *conn // goroutines waiting for a connection, guarded by mu
+
+	closed     atomic.Bool
+	closedCh   chan struct{} // closed by Close to stop the reaper
+	reaperDone chan struct{} // closed by the reaper goroutine on exit
 }
 
 type conn struct {
@@ -148,32 +173,95 @@ func (cn *conn) isExpired(idleTimeout, maxAge time.Duration) bool {
 	return false
 }
 
-// NewClient creates a new Redis client.
+// NewClient creates a new Redis client. The constructor is non-blocking: it
+// kicks off an asynchronous warm-up that dials up to MinIdle connections and
+// starts the background reaper.
 func NewClient(opts *Options) *Client {
 	c := &Client{
-		opts:     opts,
-		pool:     make([]*conn, 0, opts.poolSize()),
-		closedCh: make(chan struct{}),
+		opts:       opts,
+		pool:       make([]*conn, 0, opts.poolSize()),
+		closedCh:   make(chan struct{}),
+		reaperDone: make(chan struct{}),
 	}
-	// Start background reaper for idle/expired connections
+	// Pre-warm MinIdle connections without blocking the caller.
+	go c.warmup()
+	// Start background reaper for idle/expired connections.
 	go c.reaper()
 	return c
 }
 
-// reaper periodically removes idle and expired connections.
+// warmup dials up to MinIdle connections to satisfy the idle floor at startup.
+func (c *Client) warmup() {
+	target := c.opts.minIdle()
+	if target > c.opts.poolSize() {
+		target = c.opts.poolSize()
+	}
+	for i := 0; i < target; i++ {
+		if !c.dialIdle(context.Background()) {
+			return // closed or dial failed; reaper will retry later
+		}
+	}
+}
+
+// dialIdle reserves a slot, dials a fresh connection and parks it in the idle
+// pool. It returns false if the client is closed or the dial failed (the slot
+// is released on failure). A waiter, if any, is preferred over the idle pool so
+// pre-warming also unblocks queued callers.
+func (c *Client) dialIdle(ctx context.Context) bool {
+	c.mu.Lock()
+	if c.closed.Load() || c.active >= c.opts.poolSize() {
+		c.mu.Unlock()
+		return false
+	}
+	c.active++
+	c.mu.Unlock()
+
+	cn, err := c.dialConn(ctx)
+	if err != nil {
+		c.mu.Lock()
+		c.active--
+		c.mu.Unlock()
+		return false
+	}
+
+	c.mu.Lock()
+	if c.closed.Load() {
+		c.active--
+		c.mu.Unlock()
+		cn.nc.Close()
+		return false
+	}
+	// Prefer handing the fresh conn to a waiter, else park it as idle.
+	if w := c.popWaiterLocked(); w != nil {
+		w <- cn
+		c.mu.Unlock()
+		return true
+	}
+	c.pool = append(c.pool, cn)
+	c.mu.Unlock()
+	return true
+}
+
+// reaper periodically removes idle and expired connections and replenishes the
+// idle pool back up to MinIdle.
 func (c *Client) reaper() {
-	ticker := time.NewTicker(30 * time.Second)
+	defer close(c.reaperDone)
+	ticker := time.NewTicker(reaperInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			c.reapStaleConns()
+			c.ensureMinIdle()
 		case <-c.closedCh:
 			return
 		}
 	}
 }
 
+// reapStaleConns closes every expired idle connection. Unlike a floor-based
+// reaper it does not keep stale connections just to satisfy MinIdle; the idle
+// floor is restored separately by ensureMinIdle with fresh connections.
 func (c *Client) reapStaleConns() {
 	idleTimeout := c.opts.idleTimeout()
 	maxAge := c.opts.maxConnAge()
@@ -182,22 +270,52 @@ func (c *Client) reapStaleConns() {
 	}
 
 	c.mu.Lock()
-	minIdle := c.opts.minIdle()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		return
+	}
 	var stale []*conn
 	alive := c.pool[:0]
 	for _, cn := range c.pool {
-		if cn.isExpired(idleTimeout, maxAge) && len(alive) >= minIdle {
+		if cn.isExpired(idleTimeout, maxAge) {
 			stale = append(stale, cn)
 		} else {
 			alive = append(alive, cn)
 		}
 	}
 	c.pool = alive
+	c.active -= len(stale)
 	c.mu.Unlock()
 
 	for _, cn := range stale {
-		atomic.AddInt32(&c.active, -1)
 		cn.nc.Close()
+	}
+}
+
+// ensureMinIdle replenishes the idle pool up to MinIdle (bounded by PoolSize).
+// On the first dial failure it stops; the reaper tick is the natural backoff.
+func (c *Client) ensureMinIdle() {
+	target := c.opts.minIdle()
+	if target > c.opts.poolSize() {
+		target = c.opts.poolSize()
+	}
+	for {
+		c.mu.Lock()
+		if c.closed.Load() {
+			c.mu.Unlock()
+			return
+		}
+		// Replenish based on currently idle connections so we top the pool up
+		// rather than over-dialing while connections are in use.
+		need := target - len(c.pool)
+		full := c.active >= c.opts.poolSize()
+		c.mu.Unlock()
+		if need <= 0 || full {
+			return
+		}
+		if !c.dialIdle(context.Background()) {
+			return
+		}
 	}
 }
 
@@ -235,98 +353,164 @@ func (c *Client) dialConn(ctx context.Context) (*conn, error) {
 	return cn, nil
 }
 
-func (c *Client) getConn(ctx context.Context) (*conn, error) {
-	if c.closed.Load() {
-		return nil, fmt.Errorf("redis: client is closed")
+// popWaiterLocked removes and returns the head waiter, or nil if none. Callers
+// must hold c.mu. The returned channel has capacity 1 and receives at most one
+// send over its lifetime, so sending on it under the lock never blocks.
+func (c *Client) popWaiterLocked() chan *conn {
+	if len(c.waiters) == 0 {
+		return nil
 	}
+	w := c.waiters[0]
+	// Avoid aliasing the backing array so old entries can be GC'd.
+	c.waiters = c.waiters[1:]
+	if len(c.waiters) == 0 {
+		c.waiters = nil
+	}
+	return w
+}
 
-	c.mu.Lock()
-
-	// Try to get an idle connection from pool
+// getConn acquires a connection, blocking (subject to ctx) if the pool is
+// saturated.
+func (c *Client) getConn(ctx context.Context) (*conn, error) {
 	idleTimeout := c.opts.idleTimeout()
 	maxAge := c.opts.maxConnAge()
-	for len(c.pool) > 0 {
-		cn := c.pool[len(c.pool)-1]
-		c.pool = c.pool[:len(c.pool)-1]
 
-		if cn.isExpired(idleTimeout, maxAge) {
-			c.mu.Unlock()
-			atomic.AddInt32(&c.active, -1)
-			cn.nc.Close()
-			c.mu.Lock()
-			continue
+	for {
+		if c.closed.Load() {
+			return nil, errClosed
 		}
-		c.mu.Unlock()
-		cn.usedAt = time.Now()
-		return cn, nil
-	}
 
-	// Can we create a new connection?
-	if int(c.active) < c.opts.poolSize() {
-		c.active++
-		c.mu.Unlock()
-		cn, err := c.dialConn(ctx)
-		if err != nil {
-			atomic.AddInt32(&c.active, -1)
-			return nil, err
-		}
-		return cn, nil
-	}
-
-	// Pool is full — wait for a connection to be returned
-	ch := make(chan *conn, 1)
-	c.waiters = append(c.waiters, ch)
-	c.mu.Unlock()
-
-	select {
-	case cn := <-ch:
-		if cn == nil {
-			return nil, fmt.Errorf("redis: client is closed")
-		}
-		cn.usedAt = time.Now()
-		return cn, nil
-	case <-ctx.Done():
-		// Remove ourselves from waiters
 		c.mu.Lock()
-		for i, w := range c.waiters {
-			if w == ch {
-				c.waiters = append(c.waiters[:i], c.waiters[i+1:]...)
-				break
+		if c.closed.Load() {
+			c.mu.Unlock()
+			return nil, errClosed
+		}
+
+		// (a) Reuse an idle connection (LIFO). Collect expired ones to close
+		// outside the lock, decrementing active under mu for each.
+		var expired []*conn
+		var got *conn
+		for len(c.pool) > 0 {
+			cn := c.pool[len(c.pool)-1]
+			c.pool = c.pool[:len(c.pool)-1]
+			if cn.isExpired(idleTimeout, maxAge) {
+				c.active--
+				expired = append(expired, cn)
+				continue
 			}
+			got = cn
+			break
 		}
+		if got != nil {
+			c.mu.Unlock()
+			closeAll(expired)
+			got.usedAt = time.Now()
+			return got, nil
+		}
+
+		// (b) Open a new connection if there is room.
+		if c.active < c.opts.poolSize() {
+			c.active++
+			c.mu.Unlock()
+			closeAll(expired)
+			cn, err := c.dialConn(ctx)
+			if err != nil {
+				// Release the reserved slot and wake one waiter so a freed
+				// slot never goes unnoticed (lost-wakeup guard).
+				c.mu.Lock()
+				c.active--
+				if w := c.popWaiterLocked(); w != nil {
+					w <- nil // retry signal
+				}
+				c.mu.Unlock()
+				return nil, err
+			}
+			return cn, nil
+		}
+
+		// (c) Pool is saturated: enqueue and wait.
+		ch := make(chan *conn, 1)
+		c.waiters = append(c.waiters, ch)
 		c.mu.Unlock()
-		// Drain channel in case a connection arrived
+		closeAll(expired)
+
 		select {
-		case cn := <-ch:
-			c.putConn(cn)
-		default:
+		case cn, ok := <-ch:
+			if !ok {
+				return nil, errClosed // channel closed by Close
+			}
+			if cn == nil {
+				continue // capacity freed; retry the acquire loop
+			}
+			cn.usedAt = time.Now()
+			return cn, nil
+		case <-ctx.Done():
+			return nil, c.abandonWaiter(ch, ctx.Err())
 		}
-		return nil, ctx.Err()
 	}
 }
 
+// abandonWaiter handles ctx cancellation while parked as a waiter. If self is
+// still queued it is removed and ctxErr returned. Otherwise a sender already
+// atomically dequeued+sent (or Close dequeued+closed) before we took mu; a
+// non-blocking drain is therefore deterministic and any real connection handed
+// to us is returned to the pool before reporting ctxErr.
+func (c *Client) abandonWaiter(ch chan *conn, ctxErr error) error {
+	c.mu.Lock()
+	for i, w := range c.waiters {
+		if w == ch {
+			c.waiters = append(c.waiters[:i], c.waiters[i+1:]...)
+			if len(c.waiters) == 0 {
+				c.waiters = nil
+			}
+			c.mu.Unlock()
+			return ctxErr // we removed ourselves; nothing was handed off
+		}
+	}
+	c.mu.Unlock()
+
+	// Not in the queue: a send or close already happened-before this point.
+	select {
+	case cn, ok := <-ch:
+		if ok && cn != nil {
+			c.putConn(cn) // reclaim the connection we will not use
+		}
+		// ok && cn == nil: retry signal, nothing to reclaim.
+		// !ok: channel closed by Close, nothing to reclaim.
+	default:
+		// Unreachable given the atomic dequeue+send invariant; kept as a
+		// safety net so a missed signal can never panic or block.
+	}
+	return ctxErr
+}
+
+// putConn returns a connection to the pool, hands it to a waiter, or closes it.
 func (c *Client) putConn(cn *conn) {
+	if cn == nil { // defensive: never operate on a nil connection
+		return
+	}
+
+	c.mu.Lock()
 	if c.closed.Load() {
-		atomic.AddInt32(&c.active, -1)
+		c.active--
+		c.mu.Unlock()
 		cn.nc.Close()
 		return
 	}
 
-	c.mu.Lock()
-
-	// If someone is waiting, hand the connection directly
-	if len(c.waiters) > 0 {
-		ch := c.waiters[0]
-		c.waiters = c.waiters[1:]
+	// Hand off to a waiter directly (atomic dequeue+send under mu).
+	if w := c.popWaiterLocked(); w != nil {
+		cn.usedAt = time.Now()
+		w <- cn
 		c.mu.Unlock()
-		ch <- cn
 		return
 	}
 
-	// Check if connection should be retired
+	// No waiter exists and we hold mu throughout, so retiring an expired
+	// connection here cannot strand a wakeup.
 	if cn.isExpired(c.opts.idleTimeout(), c.opts.maxConnAge()) {
+		c.active--
 		c.mu.Unlock()
-		atomic.AddInt32(&c.active, -1)
 		cn.nc.Close()
 		return
 	}
@@ -335,9 +519,46 @@ func (c *Client) putConn(cn *conn) {
 	c.mu.Unlock()
 }
 
+// removeConn discards a broken connection, freeing its slot and waking one
+// waiter (lost-wakeup guard) so a queued caller can dial a replacement.
 func (c *Client) removeConn(cn *conn) {
-	atomic.AddInt32(&c.active, -1)
+	if cn == nil {
+		return
+	}
+	c.mu.Lock()
+	c.active--
+	if !c.closed.Load() {
+		if w := c.popWaiterLocked(); w != nil {
+			w <- nil // retry signal
+		}
+	}
+	c.mu.Unlock()
 	cn.nc.Close()
+}
+
+// closeAll closes every connection in the slice; nil-safe.
+func closeAll(conns []*conn) {
+	for _, cn := range conns {
+		if cn != nil {
+			cn.nc.Close()
+		}
+	}
+}
+
+// effectiveDeadline returns the earlier of (now + timeout) and the ctx
+// deadline. A zero timeout means "disabled" so only the ctx deadline applies.
+// The bool reports whether any deadline should be armed.
+func effectiveDeadline(ctx context.Context, timeout time.Duration) (time.Time, bool) {
+	var dl time.Time
+	if timeout > 0 {
+		dl = time.Now().Add(timeout)
+	}
+	if cd, ok := ctx.Deadline(); ok {
+		if dl.IsZero() || cd.Before(dl) {
+			dl = cd
+		}
+	}
+	return dl, !dl.IsZero()
 }
 
 func (c *Client) execOn(ctx context.Context, cn *conn, args ...any) (any, error) {
@@ -347,25 +568,24 @@ func (c *Client) execOn(ctx context.Context, cn *conn, args ...any) (any, error)
 	default:
 	}
 
-	wt := c.opts.writeTimeout()
-	if wt > 0 {
-		cn.nc.SetWriteDeadline(time.Now().Add(wt))
+	// Ensure no armed deadline leaks onto a connection that returns to the
+	// pool, even on an error path.
+	defer cn.nc.SetDeadline(time.Time{})
+
+	if dl, ok := effectiveDeadline(ctx, c.opts.writeTimeout()); ok {
+		cn.nc.SetWriteDeadline(dl)
 	}
 	if err := WriteCommand(cn.nc, args...); err != nil {
 		return nil, err
 	}
 
-	rt := c.opts.readTimeout()
-	if rt > 0 {
-		cn.nc.SetReadDeadline(time.Now().Add(rt))
+	if dl, ok := effectiveDeadline(ctx, c.opts.readTimeout()); ok {
+		cn.nc.SetReadDeadline(dl)
 	}
 	reply, err := ReadReply(cn.rd)
 	if err != nil {
 		return nil, err
 	}
-
-	// Reset deadlines
-	cn.nc.SetDeadline(time.Time{})
 
 	if e, ok := reply.(RedisError); ok {
 		return nil, e
@@ -374,6 +594,10 @@ func (c *Client) execOn(ctx context.Context, cn *conn, args ...any) (any, error)
 }
 
 // Do executes a raw Redis command and returns the reply.
+//
+// A server error reply (RedisError, e.g. -ERR/NOSCRIPT/WRONGTYPE) is returned
+// as the error but leaves the connection healthy, so it is returned to the
+// pool. Only transport/protocol errors discard the connection.
 func (c *Client) Do(ctx context.Context, args ...any) (any, error) {
 	select {
 	case <-ctx.Done():
@@ -387,7 +611,14 @@ func (c *Client) Do(ctx context.Context, args ...any) (any, error) {
 	}
 	reply, err := c.execOn(ctx, cn, args...)
 	if err != nil {
-		c.removeConn(cn) // discard broken connection
+		var rerr RedisError
+		if errors.As(err, &rerr) {
+			// Server-side error: connection is still usable.
+			c.putConn(cn)
+		} else {
+			// Transport/protocol error: discard the connection.
+			c.removeConn(cn)
+		}
 		return nil, err
 	}
 	c.putConn(cn)
@@ -401,10 +632,14 @@ func (c *Client) Close() error {
 	}
 	close(c.closedCh)
 
+	// Wait for the reaper to exit before tearing down so it cannot race the
+	// teardown (double-close, counter drift) or fight over mu.
+	<-c.reaperDone
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Wake up all waiters
+	// Wake every waiter; a closed channel signals "client closed".
 	for _, ch := range c.waiters {
 		close(ch)
 	}
@@ -412,6 +647,7 @@ func (c *Client) Close() error {
 
 	var last error
 	for _, cn := range c.pool {
+		c.active--
 		if err := cn.nc.Close(); err != nil {
 			last = err
 		}
@@ -425,7 +661,7 @@ func (c *Client) PoolStats() PoolStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return PoolStats{
-		Active:  int(atomic.LoadInt32(&c.active)),
+		Active:  c.active,
 		Idle:    len(c.pool),
 		Waiters: len(c.waiters),
 	}
