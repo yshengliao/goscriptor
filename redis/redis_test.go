@@ -1,9 +1,16 @@
+// Package redis_test contains integration tests for the redis client.
+//
+// Integration tests skip automatically when REDIS_ADDR is not set. All data
+// keys used by these tests carry the "goscriptor_test:" prefix. The suite must
+// run serially against a shared Redis instance (use -p 1 when running the full
+// module). No FlushAll is performed; cleanup is targeted per test.
 package redis_test
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -20,13 +27,27 @@ func redisAddr(t *testing.T) string {
 	return addr
 }
 
-func newTestClient(t *testing.T) *redis.Client {
+// newTestClient creates a test client. When key names are provided they are
+// prefixed with "goscriptor_test:" and deleted both immediately (to ensure a
+// clean starting state) and again on cleanup (to leave Redis tidy).
+func newTestClient(t *testing.T, keys ...string) *redis.Client {
 	t.Helper()
 	c := redis.NewClient(&redis.Options{
 		Addr:     redisAddr(t),
 		PoolSize: 2,
 	})
-	c.FlushAll(context.Background())
+	if len(keys) > 0 {
+		prefixed := make([]string, len(keys))
+		for i, k := range keys {
+			prefixed[i] = "goscriptor_test:" + k
+		}
+		ctx := context.Background()
+		// Delete at start to ensure clean state even after a previous failure.
+		c.Del(ctx, prefixed...)
+		t.Cleanup(func() {
+			c.Del(context.Background(), prefixed...)
+		})
+	}
 	return c
 }
 
@@ -221,15 +242,15 @@ func TestClient_PoolStats(t *testing.T) {
 // --- String commands ---
 
 func TestClient_GetSet(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "k1")
 	defer c.Close()
 	ctx := context.Background()
 
-	err := c.Set(ctx, "k1", "v1", 0)
+	err := c.Set(ctx, "goscriptor_test:k1", "v1", 0)
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	val, err := c.Get(ctx, "k1")
+	val, err := c.Get(ctx, "goscriptor_test:k1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -242,7 +263,7 @@ func TestClient_GetMissing(t *testing.T) {
 	c := newTestClient(t)
 	defer c.Close()
 
-	val, err := c.Get(context.Background(), "nonexistent")
+	val, err := c.Get(context.Background(), "goscriptor_test:nonexistent")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -252,25 +273,25 @@ func TestClient_GetMissing(t *testing.T) {
 }
 
 func TestClient_SetWithTTL(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "ttlkey")
 	defer c.Close()
 	ctx := context.Background()
 
-	c.Set(ctx, "ttlkey", "val", 10*time.Second)
-	ttl, _ := c.TTL(ctx, "ttlkey")
+	c.Set(ctx, "goscriptor_test:ttlkey", "val", 10*time.Second)
+	ttl, _ := c.TTL(ctx, "goscriptor_test:ttlkey")
 	if ttl <= 0 || ttl > 10 {
 		t.Fatalf("expected TTL in (0, 10], got %d", ttl)
 	}
 }
 
 func TestClient_Del(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "d1", "d2")
 	defer c.Close()
 	ctx := context.Background()
 
-	c.Set(ctx, "d1", "v", 0)
-	c.Set(ctx, "d2", "v", 0)
-	n, err := c.Del(ctx, "d1", "d2", "d3")
+	c.Set(ctx, "goscriptor_test:d1", "v", 0)
+	c.Set(ctx, "goscriptor_test:d2", "v", 0)
+	n, err := c.Del(ctx, "goscriptor_test:d1", "goscriptor_test:d2", "goscriptor_test:d3")
 	if err != nil {
 		t.Fatalf("Del: %v", err)
 	}
@@ -280,27 +301,27 @@ func TestClient_Del(t *testing.T) {
 }
 
 func TestClient_Exists(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "e1")
 	defer c.Close()
 	ctx := context.Background()
 
-	c.Set(ctx, "e1", "v", 0)
-	n, _ := c.Exists(ctx, "e1", "e2")
+	c.Set(ctx, "goscriptor_test:e1", "v", 0)
+	n, _ := c.Exists(ctx, "goscriptor_test:e1", "goscriptor_test:e2")
 	if n != 1 {
 		t.Fatalf("expected 1, got %d", n)
 	}
 }
 
 func TestClient_IncrIncrBy(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "counter")
 	defer c.Close()
 	ctx := context.Background()
 
-	v1, _ := c.Incr(ctx, "counter")
+	v1, _ := c.Incr(ctx, "goscriptor_test:counter")
 	if v1 != 1 {
 		t.Fatalf("expected 1, got %d", v1)
 	}
-	v2, _ := c.IncrBy(ctx, "counter", 9)
+	v2, _ := c.IncrBy(ctx, "goscriptor_test:counter", 9)
 	if v2 != 10 {
 		t.Fatalf("expected 10, got %d", v2)
 	}
@@ -309,21 +330,21 @@ func TestClient_IncrIncrBy(t *testing.T) {
 // --- Key commands ---
 
 func TestClient_ExpireTTL(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "ek")
 	defer c.Close()
 	ctx := context.Background()
 
-	c.Set(ctx, "ek", "v", 0)
-	ok, _ := c.Expire(ctx, "ek", 60*time.Second)
+	c.Set(ctx, "goscriptor_test:ek", "v", 0)
+	ok, _ := c.Expire(ctx, "goscriptor_test:ek", 60*time.Second)
 	if !ok {
 		t.Fatal("expected Expire to return true")
 	}
-	ttl, _ := c.TTL(ctx, "ek")
+	ttl, _ := c.TTL(ctx, "goscriptor_test:ek")
 	if ttl <= 0 || ttl > 60 {
 		t.Fatalf("expected TTL in (0, 60], got %d", ttl)
 	}
 
-	ttl2, _ := c.TTL(ctx, "nonexistent_key_xxx")
+	ttl2, _ := c.TTL(ctx, "goscriptor_test:nonexistent_key_xxx")
 	if ttl2 != -2 {
 		t.Fatalf("expected -2 for missing key, got %d", ttl2)
 	}
@@ -332,38 +353,38 @@ func TestClient_ExpireTTL(t *testing.T) {
 // --- Hash commands ---
 
 func TestClient_Hash(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "h1")
 	defer c.Close()
 	ctx := context.Background()
 
-	c.HSet(ctx, "h1", "f1", "v1")
-	c.HSet(ctx, "h1", "f2", "v2")
+	c.HSet(ctx, "goscriptor_test:h1", "f1", "v1")
+	c.HSet(ctx, "goscriptor_test:h1", "f2", "v2")
 
-	val, _ := c.HGet(ctx, "h1", "f1")
+	val, _ := c.HGet(ctx, "goscriptor_test:h1", "f1")
 	if val != "v1" {
 		t.Fatalf("HGet: expected v1, got %q", val)
 	}
 
-	missing, _ := c.HGet(ctx, "h1", "f_missing")
+	missing, _ := c.HGet(ctx, "goscriptor_test:h1", "f_missing")
 	if missing != "" {
 		t.Fatalf("HGet missing: expected empty, got %q", missing)
 	}
 
-	all, _ := c.HGetAll(ctx, "h1")
+	all, _ := c.HGetAll(ctx, "goscriptor_test:h1")
 	if len(all) != 2 || all["f1"] != "v1" || all["f2"] != "v2" {
 		t.Fatalf("HGetAll: unexpected %v", all)
 	}
 
-	exists, _ := c.HExists(ctx, "h1", "f1")
+	exists, _ := c.HExists(ctx, "goscriptor_test:h1", "f1")
 	if !exists {
 		t.Fatal("HExists: expected true")
 	}
-	notExists, _ := c.HExists(ctx, "h1", "f_missing")
+	notExists, _ := c.HExists(ctx, "goscriptor_test:h1", "f_missing")
 	if notExists {
 		t.Fatal("HExists: expected false")
 	}
 
-	n, _ := c.HDel(ctx, "h1", "f1", "f_missing")
+	n, _ := c.HDel(ctx, "goscriptor_test:h1", "f1", "f_missing")
 	if n != 1 {
 		t.Fatalf("HDel: expected 1, got %d", n)
 	}
@@ -372,45 +393,45 @@ func TestClient_Hash(t *testing.T) {
 // --- List commands ---
 
 func TestClient_List(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "list", "emptylist")
 	defer c.Close()
 	ctx := context.Background()
 
-	n, _ := c.RPush(ctx, "list", "a", "b", "c")
+	n, _ := c.RPush(ctx, "goscriptor_test:list", "a", "b", "c")
 	if n != 3 {
 		t.Fatalf("RPush: expected 3, got %d", n)
 	}
-	n, _ = c.LPush(ctx, "list", "z")
+	n, _ = c.LPush(ctx, "goscriptor_test:list", "z")
 	if n != 4 {
 		t.Fatalf("LPush: expected 4, got %d", n)
 	}
 
-	length, _ := c.LLen(ctx, "list")
+	length, _ := c.LLen(ctx, "goscriptor_test:list")
 	if length != 4 {
 		t.Fatalf("LLen: expected 4, got %d", length)
 	}
 
-	head, _ := c.LPop(ctx, "list")
+	head, _ := c.LPop(ctx, "goscriptor_test:list")
 	if head != "z" {
 		t.Fatalf("LPop: expected z, got %q", head)
 	}
-	tail, _ := c.RPop(ctx, "list")
+	tail, _ := c.RPop(ctx, "goscriptor_test:list")
 	if tail != "c" {
 		t.Fatalf("RPop: expected c, got %q", tail)
 	}
 
-	items, _ := c.LRange(ctx, "list", 0, -1)
+	items, _ := c.LRange(ctx, "goscriptor_test:list", 0, -1)
 	if len(items) != 2 || items[0] != "a" || items[1] != "b" {
 		t.Fatalf("LRange: expected [a b], got %v", items)
 	}
 
 	// Pop from empty
-	c.Del(ctx, "list")
-	empty, _ := c.LPop(ctx, "emptylist")
+	c.Del(ctx, "goscriptor_test:list")
+	empty, _ := c.LPop(ctx, "goscriptor_test:emptylist")
 	if empty != "" {
 		t.Fatalf("LPop empty: expected empty, got %q", empty)
 	}
-	emptyR, _ := c.RPop(ctx, "emptylist")
+	emptyR, _ := c.RPop(ctx, "goscriptor_test:emptylist")
 	if emptyR != "" {
 		t.Fatalf("RPop empty: expected empty, got %q", emptyR)
 	}
@@ -419,35 +440,35 @@ func TestClient_List(t *testing.T) {
 // --- Set commands ---
 
 func TestClient_Set_Commands(t *testing.T) {
-	c := newTestClient(t)
+	c := newTestClient(t, "s1")
 	defer c.Close()
 	ctx := context.Background()
 
-	n, _ := c.SAdd(ctx, "s1", "a", "b", "c")
+	n, _ := c.SAdd(ctx, "goscriptor_test:s1", "a", "b", "c")
 	if n != 3 {
 		t.Fatalf("SAdd: expected 3, got %d", n)
 	}
 
-	card, _ := c.SCard(ctx, "s1")
+	card, _ := c.SCard(ctx, "goscriptor_test:s1")
 	if card != 3 {
 		t.Fatalf("SCard: expected 3, got %d", card)
 	}
 
-	isMember, _ := c.SIsMember(ctx, "s1", "a")
+	isMember, _ := c.SIsMember(ctx, "goscriptor_test:s1", "a")
 	if !isMember {
 		t.Fatal("SIsMember: expected true for 'a'")
 	}
-	isMember2, _ := c.SIsMember(ctx, "s1", "z")
+	isMember2, _ := c.SIsMember(ctx, "goscriptor_test:s1", "z")
 	if isMember2 {
 		t.Fatal("SIsMember: expected false for 'z'")
 	}
 
-	members, _ := c.SMembers(ctx, "s1")
+	members, _ := c.SMembers(ctx, "goscriptor_test:s1")
 	if len(members) != 3 {
 		t.Fatalf("SMembers: expected 3 members, got %d", len(members))
 	}
 
-	removed, _ := c.SRem(ctx, "s1", "a", "z")
+	removed, _ := c.SRem(ctx, "goscriptor_test:s1", "a", "z")
 	if removed != 1 {
 		t.Fatalf("SRem: expected 1, got %d", removed)
 	}
@@ -501,6 +522,7 @@ func TestClient_EvalEvalSha(t *testing.T) {
 
 func TestClient_PoolExhaustion(t *testing.T) {
 	addr := redisAddr(t)
+	// Pool size 1: the holder takes the only connection via BLPOP.
 	c := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		PoolSize: 1,
@@ -508,24 +530,64 @@ func TestClient_PoolExhaustion(t *testing.T) {
 	defer c.Close()
 	ctx := context.Background()
 
-	// Fill pool with one connection
-	c.Ping(ctx)
+	// A second helper client is used to unblock the BLPOP deterministically.
+	helper := redis.NewClient(&redis.Options{Addr: addr, PoolSize: 1})
+	defer helper.Close()
 
-	// Second concurrent request should wait, then succeed once first returns
-	done := make(chan error, 1)
+	holderKey := "goscriptor_test:pool-exhaust:holder"
+	// Delete upfront in case a previous run left an item in the list.
+	helper.Del(context.Background(), holderKey)
+	defer helper.Del(context.Background(), holderKey)
+
+	// Hold the only connection with a blocking BLPOP.
+	holderDone := make(chan error, 1)
 	go func() {
-		_, err := c.Do(ctx, "PING")
-		done <- err
+		_, err := c.Do(ctx, "BLPOP", holderKey, "5")
+		holderDone <- err
 	}()
 
-	// Small sleep to let goroutine start waiting
-	time.Sleep(10 * time.Millisecond)
+	// Poll until the pool shows Active=1, Idle=0, Waiters=0 (holder owns it).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s := c.PoolStats()
+		if s.Active == 1 && s.Idle == 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := c.PoolStats(); !(s.Active == 1 && s.Idle == 0) {
+		t.Fatalf("holder never took the connection: %+v", s)
+	}
 
-	// This should release the connection
-	c.Ping(ctx)
+	// Second concurrent request should queue as a waiter.
+	waitDone := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, "PING")
+		waitDone <- err
+	}()
 
-	err := <-done
-	if err != nil {
+	// Poll until there is a waiter.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.PoolStats().Waiters == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if c.PoolStats().Waiters != 1 {
+		t.Fatalf("waiter never queued: %+v", c.PoolStats())
+	}
+
+	// Unblock the holder by pushing an item onto the list.
+	if _, err := helper.LPush(ctx, holderKey, "go"); err != nil {
+		t.Fatalf("LPush to unblock holder: %v", err)
+	}
+
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder BLPOP failed: %v", err)
+	}
+
+	if err := <-waitDone; err != nil {
 		t.Fatalf("concurrent Ping failed: %v", err)
 	}
 }
@@ -540,18 +602,37 @@ func TestClient_PoolWaiterContextCancel(t *testing.T) {
 
 	ctx := context.Background()
 
+	// A helper client is used to unblock the BLPOP holder after the test so
+	// we can use a generous timeout (5s) and avoid races.
+	helper := redis.NewClient(&redis.Options{Addr: addr, PoolSize: 1})
+	defer helper.Close()
+
+	holderKey := "goscriptor_test:pool-waiter-cancel:holder"
+	// Delete upfront in case a previous run left an item in the list.
+	helper.Del(context.Background(), holderKey)
+	defer helper.Del(context.Background(), holderKey)
+
 	// Hold the only connection with a server-side blocking command. BLPOP keeps
-	// this connection occupied for ~300ms without busying the Redis event loop
-	// (a Lua busy-wait cannot work here: the script clock is frozen during
-	// execution, turning a timed loop into an infinite one that stalls the
-	// whole server).
+	// this connection occupied without busying the Redis event loop.
 	hold := make(chan struct{})
 	go func() {
-		c.Do(ctx, "BLPOP", "goscriptor:test:pool-waiter:absent", "0.3")
+		c.Do(ctx, "BLPOP", holderKey, "5")
 		close(hold)
 	}()
 
-	time.Sleep(20 * time.Millisecond) // let goroutine take the connection
+	// Poll until Active=1, Idle=0 so the holder owns the connection before we
+	// issue the short-ctx call.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s := c.PoolStats()
+		if s.Active == 1 && s.Idle == 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := c.PoolStats(); !(s.Active == 1 && s.Idle == 0) {
+		t.Fatalf("holder never took the connection: %+v", s)
+	}
 
 	shortCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
@@ -560,6 +641,9 @@ func TestClient_PoolWaiterContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
+
+	// Unblock the holder so it exits cleanly.
+	helper.LPush(context.Background(), holderKey, "done")
 	<-hold
 }
 
@@ -572,8 +656,8 @@ func TestClient_CustomTimeouts(t *testing.T) {
 		DialTimeout:  2 * time.Second,
 		ReadTimeout:  1 * time.Second,
 		WriteTimeout: 1 * time.Second,
-		IdleTimeout:  1 * time.Second,
-		MaxConnAge:   1 * time.Second,
+		IdleTimeout:  300 * time.Millisecond,
+		MaxConnAge:   300 * time.Millisecond,
 	})
 	defer c.Close()
 
@@ -582,8 +666,10 @@ func TestClient_CustomTimeouts(t *testing.T) {
 		t.Fatalf("Ping with custom timeouts: %v", err)
 	}
 
-	// Wait for connections to expire, then ping again (forces new connection)
-	time.Sleep(1200 * time.Millisecond)
+	// Wait for connections to expire, then ping again (forces new connection).
+	// The pool replenishes MinIdle via the background reaper every 30s, so the
+	// expiry-then-ping path exercises lazy re-dial — assertions stay as-is.
+	time.Sleep(500 * time.Millisecond)
 	if err := c.Ping(ctx); err != nil {
 		t.Fatalf("Ping after expiry: %v", err)
 	}
@@ -618,5 +704,12 @@ func TestClient_WrongPassword(t *testing.T) {
 	err := c.Ping(context.Background())
 	if err == nil {
 		t.Fatal("expected auth error")
+	}
+	// The failure must be a server reply (RedisError), not a dial/transport
+	// error. Against a no-auth Redis, the server replies with an ERR message
+	// about no password being set — still a RedisError.
+	var rerr redis.RedisError
+	if !errors.As(err, &rerr) {
+		t.Fatalf("expected a RedisError (server reply), got %T: %v", err, err)
 	}
 }

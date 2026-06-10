@@ -243,17 +243,10 @@ func TestRedisArrayReplyReader_BeyondBounds(t *testing.T) {
 }
 
 func TestExec_EmptyScript(t *testing.T) {
-	addr := redisAddr(t)
-	host, port := splitAddr(t, addr)
-
-	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
-	s, err := goscriptor.NewDB(context.Background(), opt, 1, "test_empty_script", nil)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	_, err = s.Exec(context.Background(), "", nil)
+	// Pure unit test: no Redis connection required. The zero-value Scriptor is
+	// safe because the empty-script guard returns before any client access.
+	s := &goscriptor.Scriptor{}
+	_, err := s.Exec(context.Background(), "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty script")
 	}

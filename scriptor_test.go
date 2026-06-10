@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/yshengliao/goscriptor"
+	"github.com/yshengliao/goscriptor/redis"
 )
 
 const (
@@ -22,10 +24,26 @@ var (
 	}
 )
 
+// cleanScriptDB deletes the script definition hash key(s) on DB 1 using a
+// dedicated client so no raw SELECT is ever sent through a pooled connection.
+func cleanScriptDB(t *testing.T, addr string, keys ...string) {
+	t.Helper()
+	c := redis.NewClient(&redis.Options{Addr: addr, DB: 1, PoolSize: 1})
+	defer c.Close()
+	ctx := context.Background()
+	for _, k := range keys {
+		if _, err := c.Del(ctx, k); err != nil {
+			t.Logf("cleanScriptDB Del %q: %v", k, err)
+		}
+	}
+}
+
 func newTestDB(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
 	t.Helper()
 	addr := redisAddr(t)
 	host, port := splitAddr(t, addr)
+
+	cleanScriptDB(t, addr, scriptDefinition)
 
 	opt := &goscriptor.Option{
 		Host:     host,
@@ -34,11 +52,6 @@ func newTestDB(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
 		DB:       0,
 		PoolSize: 1,
 	}
-
-	// Flush to ensure clean state
-	tmp := opt.Create()
-	tmp.FlushAll(context.Background())
-	tmp.Close()
 
 	s, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, scr)
 	if err != nil {
@@ -51,6 +64,8 @@ func newTestNew(t *testing.T, scr map[string]string) *goscriptor.Scriptor {
 	t.Helper()
 	addr := redisAddr(t)
 	host, port := splitAddr(t, addr)
+
+	cleanScriptDB(t, addr, scriptDefinition)
 
 	opt := &goscriptor.Option{
 		Host:     host,
@@ -76,7 +91,7 @@ func assertTestCase(t *testing.T, scriptor *goscriptor.Scriptor) {
 	t.Helper()
 	ctx := context.Background()
 
-	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", []string{""})
+	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", nil)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -84,12 +99,12 @@ func assertTestCase(t *testing.T, scriptor *goscriptor.Scriptor) {
 		t.Fatalf("expected 'Hello, World!', got %v", res)
 	}
 
-	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", []string{""})
+	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", nil)
 	if err == nil {
 		t.Fatal("expected error from bad script")
 	}
 
-	res, err = scriptor.ExecSha(ctx, hello, []string{""})
+	res, err = scriptor.ExecSha(ctx, hello, nil)
 	if err != nil {
 		t.Fatalf("ExecSha: %v", err)
 	}
@@ -97,7 +112,7 @@ func assertTestCase(t *testing.T, scriptor *goscriptor.Scriptor) {
 		t.Fatalf("expected 'Hello, World!', got %v", res)
 	}
 
-	_, err = scriptor.ExecSha(ctx, hello+" not found", []string{""})
+	_, err = scriptor.ExecSha(ctx, hello+" not found", nil)
 	if err == nil {
 		t.Fatal("expected error for missing script")
 	}
@@ -110,7 +125,7 @@ func assertTestCaseScriptNil(t *testing.T, scriptor *goscriptor.Scriptor) {
 	t.Helper()
 	ctx := context.Background()
 
-	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", []string{""})
+	res, err := scriptor.Exec(ctx, "return 'Hello, World!'", nil)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -118,12 +133,12 @@ func assertTestCaseScriptNil(t *testing.T, scriptor *goscriptor.Scriptor) {
 		t.Fatalf("expected 'Hello, World!', got %v", res)
 	}
 
-	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", []string{""})
+	_, err = scriptor.Exec(ctx, "error return 'Hello, World!'", nil)
 	if err == nil {
 		t.Fatal("expected error from bad script")
 	}
 
-	_, err = scriptor.ExecSha(ctx, hello, []string{""})
+	_, err = scriptor.ExecSha(ctx, hello, nil)
 	if err == nil {
 		t.Fatal("expected error for nil scripts")
 	}
@@ -153,12 +168,11 @@ func TestNewDB(t *testing.T) {
 	t.Run("reload from cache", func(t *testing.T) {
 		addr := redisAddr(t)
 		host, port := splitAddr(t, addr)
-		opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
 
-		// Flush then register
-		tmp := opt.Create()
-		tmp.FlushAll(context.Background())
-		tmp.Close()
+		// Clean then register.
+		cleanScriptDB(t, addr, scriptDefinition)
+
+		opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
 
 		s1, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, scripts)
 		if err != nil {
@@ -166,7 +180,7 @@ func TestNewDB(t *testing.T) {
 		}
 		assertTestCase(t, s1)
 
-		// Reload from cache (nil scripts, no flush)
+		// Reload from cache (nil scripts, no clean).
 		s2, err := goscriptor.NewDB(context.Background(), opt, 1, scriptDefinition, nil)
 		if err != nil {
 			t.Fatalf("NewDB reload: %v", err)
@@ -175,11 +189,14 @@ func TestNewDB(t *testing.T) {
 	})
 
 	t.Run("flush and re-register", func(t *testing.T) {
+		addr := redisAddr(t)
 		s := newTestDB(t, scripts)
-		err := s.Client.FlushAll(context.Background())
-		if err != nil {
-			t.Fatalf("FlushAll: %v", err)
+		// Flush script cache only for this sub-test.
+		if _, err := s.Client.Do(context.Background(), "SCRIPT", "FLUSH"); err != nil {
+			t.Fatalf("SCRIPT FLUSH: %v", err)
 		}
+		// Also remove the definition key so s2 starts clean.
+		cleanScriptDB(t, addr, scriptDefinition)
 
 		s2 := newTestDB(t, nil)
 		assertTestCaseScriptNil(t, s2)
@@ -212,9 +229,26 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("reload from cache", func(t *testing.T) {
-		_ = newTestNew(t, scripts)
-		s := newTestNew(t, nil)
-		assertTestCase(t, s)
+		addr := redisAddr(t)
+		host, port := splitAddr(t, addr)
+
+		// Clean once, register, then reload without cleaning again.
+		cleanScriptDB(t, addr, scriptDefinition)
+		opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
+
+		client1 := opt.Create()
+		s1, err := goscriptor.New(context.Background(), client1, 1, scriptDefinition, scripts)
+		if err != nil {
+			t.Fatalf("New (register): %v", err)
+		}
+		assertTestCase(t, s1)
+
+		client2 := opt.Create()
+		s2, err := goscriptor.New(context.Background(), client2, 1, scriptDefinition, nil)
+		if err != nil {
+			t.Fatalf("New (reload from cache): %v", err)
+		}
+		assertTestCase(t, s2)
 	})
 }
 
@@ -226,7 +260,7 @@ func TestExecSha_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := s.ExecSha(ctx, hello, []string{""})
+	_, err := s.ExecSha(ctx, hello, nil)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
@@ -243,6 +277,24 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+
+	// After Close, commands must fail.
+	_, pingErr := s.Client.Do(context.Background(), "PING")
+	if pingErr == nil {
+		t.Fatal("expected error after Close")
+	}
+
+	// Active connections must drain to zero within 2 seconds.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.Client.PoolStats().Active == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s.Client.PoolStats().Active != 0 {
+		t.Fatalf("pool Active did not reach 0 after Close: %+v", s.Client.PoolStats())
+	}
 }
 
 // TestExecSha_NoScriptSelfHeal verifies that after the Redis script cache is
@@ -256,7 +308,7 @@ func TestExecSha_NoScriptSelfHeal(t *testing.T) {
 	ctx := context.Background()
 
 	// Sanity: first execution works against the freshly registered script.
-	if _, err := s.ExecSha(ctx, hello, []string{""}); err != nil {
+	if _, err := s.ExecSha(ctx, hello, nil); err != nil {
 		t.Fatalf("initial ExecSha: %v", err)
 	}
 
@@ -266,7 +318,7 @@ func TestExecSha_NoScriptSelfHeal(t *testing.T) {
 	}
 
 	// Self-heal: the NOSCRIPT path must reload the body and succeed.
-	res, err := s.ExecSha(ctx, hello, []string{""})
+	res, err := s.ExecSha(ctx, hello, nil)
 	if err != nil {
 		t.Fatalf("ExecSha after flush (self-heal): %v", err)
 	}
@@ -275,7 +327,7 @@ func TestExecSha_NoScriptSelfHeal(t *testing.T) {
 	}
 
 	// The cache is now refreshed; a second call must succeed without reloading.
-	res, err = s.ExecSha(ctx, hello, []string{""})
+	res, err = s.ExecSha(ctx, hello, nil)
 	if err != nil {
 		t.Fatalf("second ExecSha after self-heal: %v", err)
 	}
@@ -290,16 +342,14 @@ func TestExecSha_NoScriptSelfHeal(t *testing.T) {
 func TestExecSha_ChangedBodyReRegister(t *testing.T) {
 	addr := redisAddr(t)
 	host, port := splitAddr(t, addr)
-	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
-
-	// Clean slate.
-	tmp := opt.Create()
-	tmp.FlushAll(context.Background())
-	tmp.Close()
 
 	const def = "changed_body|def"
 	const name = "swap"
 
+	// Clean the definition key before starting.
+	cleanScriptDB(t, addr, def)
+
+	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
 	ctx := context.Background()
 
 	// First Scriptor registers body A under name "swap".
@@ -309,7 +359,7 @@ func TestExecSha_ChangedBodyReRegister(t *testing.T) {
 	}
 	defer func() { _ = s1.Close() }()
 
-	resA, err := s1.ExecSha(ctx, name, []string{""})
+	resA, err := s1.ExecSha(ctx, name, nil)
 	if err != nil {
 		t.Fatalf("s1 ExecSha: %v", err)
 	}
@@ -325,7 +375,7 @@ func TestExecSha_ChangedBodyReRegister(t *testing.T) {
 	}
 	defer func() { _ = s2.Close() }()
 
-	resB, err := s2.ExecSha(ctx, name, []string{""})
+	resB, err := s2.ExecSha(ctx, name, nil)
 	if err != nil {
 		t.Fatalf("s2 ExecSha: %v", err)
 	}
@@ -341,13 +391,11 @@ func TestExecSha_ChangedBodyReRegister(t *testing.T) {
 func TestExecSha_LoadFromCacheNoSelfHeal(t *testing.T) {
 	addr := redisAddr(t)
 	host, port := splitAddr(t, addr)
+
+	// Clean then register via a first Scriptor.
+	cleanScriptDB(t, addr, scriptDefinition)
+
 	opt := &goscriptor.Option{Host: host, Port: port, DB: 0, PoolSize: 1}
-
-	// Clean slate, then register via a first Scriptor.
-	tmp := opt.Create()
-	tmp.FlushAll(context.Background())
-	tmp.Close()
-
 	ctx := context.Background()
 
 	s1, err := goscriptor.NewDB(ctx, opt, 1, scriptDefinition, scripts)
@@ -368,7 +416,7 @@ func TestExecSha_LoadFromCacheNoSelfHeal(t *testing.T) {
 		t.Fatalf("SCRIPT FLUSH: %v", err)
 	}
 
-	_, err = s2.ExecSha(ctx, hello, []string{""})
+	_, err = s2.ExecSha(ctx, hello, nil)
 	if err == nil {
 		t.Fatal("expected error from load-from-cache Scriptor after flush")
 	}
