@@ -10,7 +10,7 @@ import (
 
 const (
 	scriptDefinitionTest = "scriptKey|0.0.0"
-	hello                = "hello"
+	helloScriptName      = "hello"
 	helloScript          = `return 'Hello, World!'`
 )
 
@@ -20,8 +20,14 @@ func testRedisClient(t *testing.T) *redis.Client {
 	if addr == "" {
 		t.Skip("REDIS_ADDR not set, skipping integration test")
 	}
+	// Use a dedicated DB-1 client for the script definition key so no raw
+	// SELECT is sent through a pooled connection.
+	cleanClient := redis.NewClient(&redis.Options{Addr: addr, DB: 1, PoolSize: 1})
+	defer cleanClient.Close()
+	ctx := context.Background()
+	cleanClient.Del(ctx, scriptDefinitionTest)
+
 	client := redis.NewClient(&redis.Options{Addr: addr, DB: 0, PoolSize: 1})
-	client.FlushAll(context.Background())
 	return client
 }
 
@@ -29,13 +35,13 @@ func TestScriptDescriptor_Register(t *testing.T) {
 	client := testRedisClient(t)
 	ctx := context.Background()
 
-	scripts := map[string]string{hello: helloScript}
-	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	scripts := map[string]string{helloScriptName: helloScript}
+	sd := &scriptDescriptor{}
+	err := sd.register(ctx, client, scripts, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("register: %v", err)
 	}
-	sha := sd.container[hello]
+	sha := sd.container[helloScriptName].sha
 	if sha == "" {
 		t.Fatal("expected non-empty SHA")
 	}
@@ -53,21 +59,21 @@ func TestScriptDescriptor_LoadScripts(t *testing.T) {
 	client := testRedisClient(t)
 	ctx := context.Background()
 
-	scripts := map[string]string{hello: helloScript}
-	sd := &ScriptDescriptor{}
-	err := sd.Register(ctx, client, scripts, scriptDefinitionTest, 1)
+	scripts := map[string]string{helloScriptName: helloScript}
+	sd := &scriptDescriptor{}
+	err := sd.register(ctx, client, scripts, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("register: %v", err)
 	}
-	sha := sd.container[hello]
+	sha := sd.container[helloScriptName].sha
 
-	sd2 := &ScriptDescriptor{}
-	err = sd2.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd2 := &scriptDescriptor{}
+	err = sd2.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("LoadScripts: %v", err)
+		t.Fatalf("loadScripts: %v", err)
 	}
-	if sd2.container[hello] != sha {
-		t.Fatalf("expected SHA %q, got %q", sha, sd2.container[hello])
+	if sd2.container[helloScriptName].sha != sha {
+		t.Fatalf("expected SHA %q, got %q", sha, sd2.container[helloScriptName].sha)
 	}
 }
 
@@ -75,25 +81,35 @@ func TestScriptDescriptor_LoadScripts_NoKey(t *testing.T) {
 	client := testRedisClient(t)
 	ctx := context.Background()
 
-	sd := &ScriptDescriptor{}
-	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err != nil {
-		t.Fatalf("LoadScripts should not error on missing key: %v", err)
+		t.Fatalf("loadScripts should not error on missing key: %v", err)
 	}
-	if sd.container != nil {
-		t.Fatalf("expected nil container, got %v", sd.container)
+	if len(sd.container) != 0 {
+		t.Fatalf("expected empty container, got %v", sd.container)
 	}
 }
 
 func TestScriptDescriptor_LoadScripts_MissingScript(t *testing.T) {
-	client := testRedisClient(t)
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		t.Skip("REDIS_ADDR not set, skipping integration test")
+	}
+
+	// Use a dedicated DB-1 client to write the test entry without poisoning
+	// any pooled connection's DB state.
+	db1Client := redis.NewClient(&redis.Options{Addr: addr, DB: 1, PoolSize: 1})
+	defer db1Client.Close()
 	ctx := context.Background()
+	db1Client.HSet(ctx, scriptDefinitionTest, helloScriptName, "deadbeef")
 
-	client.Do(ctx, "SELECT", 1)
-	client.HSet(ctx, scriptDefinitionTest, hello, "deadbeef")
+	// The test client uses DB 0; loadScripts will SELECT 1 via Lua.
+	client := redis.NewClient(&redis.Options{Addr: addr, DB: 0, PoolSize: 1})
+	defer client.Close()
 
-	sd := &ScriptDescriptor{}
-	err := sd.LoadScripts(ctx, client, scriptDefinitionTest, 1)
+	sd := &scriptDescriptor{}
+	err := sd.loadScripts(ctx, client, scriptDefinitionTest, 1)
 	if err == nil {
 		t.Fatal("expected error for missing script in cache")
 	}

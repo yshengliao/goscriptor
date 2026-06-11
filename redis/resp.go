@@ -5,9 +5,17 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"sync"
 )
+
+// maxBulkLen is Redis's proto-max-bulk-len default (512 MB).
+const maxBulkLen = 512 << 20
+
+// maxArrayLen caps RESP array allocations to prevent malicious or corrupt length
+// headers from triggering huge allocations.
+const maxArrayLen = 1 << 24
 
 // RedisError represents an error reply from Redis.
 type RedisError string
@@ -21,7 +29,17 @@ var bufPool = sync.Pool{
 	},
 }
 
-// WriteCommand serialises a Redis command in RESP2 array format.
+// WriteCommand serialises a Redis command in RESP2 array format and writes it to w.
+//
+// Supported argument types: string, []byte, int, int64, int32, float64, float32, bool.
+//   - float64 and float32 are formatted with 'f' notation (no scientific notation) because
+//     Redis cannot parse scientific notation.
+//   - bool is encoded as "1" (true) or "0" (false).
+//   - Any other type, including nil, returns an error rather than silently sending
+//     Go-formatted garbage to the server.
+//
+// WriteCommand also guards against partial writes: if the underlying io.Writer accepts
+// fewer bytes than requested without returning an error, io.ErrShortWrite is returned.
 func WriteCommand(w io.Writer, args ...any) error {
 	ptr := bufPool.Get().(*[]byte)
 	buf := (*ptr)[:0] // reset length
@@ -39,10 +57,27 @@ func WriteCommand(w io.Writer, args ...any) error {
 			s = string(v) // safe: transient use for length/append
 		case int:
 			s = strconv.Itoa(v)
+		case int32:
+			s = strconv.FormatInt(int64(v), 10)
 		case int64:
 			s = strconv.FormatInt(v, 10)
+		case float64:
+			s = strconv.FormatFloat(v, 'f', -1, 64)
+		case float32:
+			s = strconv.FormatFloat(float64(v), 'f', -1, 32)
+		case bool:
+			if v {
+				s = "1"
+			} else {
+				s = "0"
+			}
 		default:
-			s = fmt.Sprint(arg)
+			// Return the buffer to the pool before returning the error.
+			if cap(buf) <= 4096 {
+				*ptr = buf
+				bufPool.Put(ptr)
+			}
+			return fmt.Errorf("redis: unsupported argument type %T", arg)
 		}
 
 		buf = append(buf, '$')
@@ -52,14 +87,17 @@ func WriteCommand(w io.Writer, args ...any) error {
 		buf = append(buf, '\r', '\n')
 	}
 
-	_, err := w.Write(buf)
-	
-	// Put back only if it hasn't grown outrageously large
+	n, err := w.Write(buf)
+	if err == nil && n < len(buf) {
+		err = io.ErrShortWrite
+	}
+
+	// Put back only if it hasn't grown outrageously large.
 	if cap(buf) <= 4096 {
 		*ptr = buf
 		bufPool.Put(ptr)
 	}
-	
+
 	return err
 }
 
@@ -89,24 +127,28 @@ func ReadReply(r *bufio.Reader) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("redis: invalid bulk length %q", line[1:])
 		}
-		if n < 0 {
-			return nil, nil
+		if n == -1 {
+			return nil, nil // RESP null bulk string
+		}
+		if n < -1 || n > maxBulkLen {
+			return nil, fmt.Errorf("redis: bulk length out of range: %d", n)
 		}
 		// Read exact bulk string size + \r\n
 		buf := make([]byte, n+2)
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
-		// Zero-copy string conversion from []byte using unsafe, but since we just allocated it, 
-		// standard string() is identical or compiler optimized
 		return string(buf[:n]), nil
 	case '*':
 		n, err := parseAsciiInt(line[1:])
 		if err != nil {
 			return nil, fmt.Errorf("redis: invalid array length %q", line[1:])
 		}
-		if n < 0 {
-			return nil, nil
+		if n == -1 {
+			return nil, nil // RESP null array
+		}
+		if n < -1 || n > maxArrayLen {
+			return nil, fmt.Errorf("redis: array length out of range: %d", n)
 		}
 		arr := make([]any, n)
 		for i := range arr {
@@ -142,6 +184,7 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 }
 
 // parseAsciiInt is a fast path for ASCII integer parsing to avoid string allocations.
+// It detects overflow and rejects bare sign characters with no digits.
 func parseAsciiInt(b []byte) (int64, error) {
 	if len(b) == 0 {
 		return 0, fmt.Errorf("empty int")
@@ -155,11 +198,20 @@ func parseAsciiInt(b []byte) (int64, error) {
 	} else if b[0] == '+' {
 		start = 1
 	}
+	// Reject bare "-" or "+" with no digits.
+	if start == len(b) {
+		return 0, fmt.Errorf("no digits after sign")
+	}
 	for i := start; i < len(b); i++ {
 		if b[i] < '0' || b[i] > '9' {
 			return 0, fmt.Errorf("invalid char")
 		}
-		n = n*10 + int64(b[i]-'0')
+		digit := int64(b[i] - '0')
+		// Overflow guard: n*10 + digit > math.MaxInt64
+		if n > (math.MaxInt64-digit)/10 {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		n = n*10 + digit
 	}
 	return n * sign, nil
 }

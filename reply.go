@@ -1,10 +1,12 @@
 package goscriptor
 
 import (
+	"math"
 	"strconv"
 )
 
 // EmptyRedisReplyValue represents a nil Redis reply value.
+// It is kept for API compatibility; internal code allocates fresh values on over-read.
 var EmptyRedisReplyValue = &RedisReplyValue{value: nil}
 
 // RedisReplyValue wraps a value returned from Redis.
@@ -24,14 +26,30 @@ func (v *RedisReplyValue) Value() any {
 	return v.value
 }
 
-// AsInt32 converts the underlying value to an int32, returning a default if parsing fails.
+// AsInt32 converts the underlying value to an int32, returning defaultValue if parsing fails.
+//
+// For string values, ParseInt is tried first. If the string is not a plain integer (e.g. "3.9"),
+// ParseFloat is used as a fallback and the result is truncated toward zero. Values outside the
+// int32 range are clipped after the float parse.
 func (v *RedisReplyValue) AsInt32(defaultValue int32) (int32, error) {
 	if v.value != nil {
 		switch val := v.value.(type) {
 		case string:
-			r, err := strconv.ParseFloat(val, 32)
+			// Try exact integer parse first (no precision loss).
+			if i, err := strconv.ParseInt(val, 10, 32); err == nil {
+				return int32(i), nil
+			}
+			// Fall back to float for strings like "3.9" (truncation toward zero).
+			r, err := strconv.ParseFloat(val, 64)
 			if err != nil {
 				return defaultValue, err
+			}
+			// Range-check into int32.
+			if r > math.MaxInt32 {
+				return math.MaxInt32, nil
+			}
+			if r < math.MinInt32 {
+				return math.MinInt32, nil
 			}
 			return int32(r), nil
 		case int:
@@ -45,11 +63,20 @@ func (v *RedisReplyValue) AsInt32(defaultValue int32) (int32, error) {
 	return defaultValue, nil
 }
 
-// AsInt64 converts the underlying value to an int64, returning a default if parsing fails.
+// AsInt64 converts the underlying value to an int64, returning defaultValue if parsing fails.
+//
+// For string values, ParseInt is tried first (exact, no precision loss above 2^53).
+// If the string is not a plain integer (e.g. "3.9"), ParseFloat is used as a fallback
+// and the result is truncated toward zero.
 func (v *RedisReplyValue) AsInt64(defaultValue int64) (int64, error) {
 	if v.value != nil {
 		switch val := v.value.(type) {
 		case string:
+			// Try exact integer parse first (no precision loss).
+			if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+				return i, nil
+			}
+			// Fall back to float for strings like "3.9" (truncation toward zero).
 			r, err := strconv.ParseFloat(val, 64)
 			if err != nil {
 				return defaultValue, err
@@ -92,6 +119,10 @@ func (v *RedisReplyValue) AsFloat64(defaultValue float64) (float64, error) {
 }
 
 // AsString converts the underlying value to a string.
+//
+// Supported types: string, int, int32, int64, float32, float64.
+// float32 and float64 are formatted with 'f' notation (no scientific notation).
+// For all other types (including nil) an empty string is returned.
 func (v *RedisReplyValue) AsString() string {
 	if v.value != nil {
 		switch val := v.value.(type) {
@@ -103,6 +134,10 @@ func (v *RedisReplyValue) AsString() string {
 			return strconv.FormatInt(int64(val), 10)
 		case int64:
 			return strconv.FormatInt(val, 10)
+		case float32:
+			return strconv.FormatFloat(float64(val), 'f', -1, 32)
+		case float64:
+			return strconv.FormatFloat(val, 'f', -1, 64)
 		}
 	}
 	return ""
@@ -147,7 +182,7 @@ func (v *RedisReplyValue) NullableString() *string {
 // RedisArrayReplyReader provides sequential access to an array reply.
 type RedisArrayReplyReader struct {
 	redisReply []any
-	position   uint32
+	position   int
 }
 
 // NewRedisArrayReplyReader creates a new reader for the given array reply.
@@ -165,9 +200,7 @@ func (r *RedisArrayReplyReader) GetLength() int {
 
 // HasNext returns true if there are more items to read.
 func (r *RedisArrayReplyReader) HasNext() bool {
-	values := r.redisReply
-	pos := r.position
-	return pos < uint32(len(values))
+	return r.position < len(r.redisReply)
 }
 
 // ReadArray reads the next value as a nested array reply reader.
@@ -205,22 +238,31 @@ func (r *RedisArrayReplyReader) SkipValue() {
 	r.ReadValue()
 }
 
-// ReadValue reads the next value as a RedisReplyValue.
+// ReadValue reads the next value as a RedisReplyValue and advances the cursor.
+// If the cursor is already at or past the end, a fresh nil-valued RedisReplyValue
+// is returned (IsNil() == true) and the cursor is not moved further.
 func (r *RedisArrayReplyReader) ReadValue() *RedisReplyValue {
-	values := r.redisReply
 	pos := r.position
-	r.position++
-	if pos < uint32(len(values)) {
-		return &RedisReplyValue{value: values[pos]}
+	if pos < len(r.redisReply) {
+		r.position++
+		return &RedisReplyValue{value: r.redisReply[pos]}
 	}
-	return EmptyRedisReplyValue
+	// Return a fresh value rather than the shared EmptyRedisReplyValue singleton
+	// so that callers cannot mutate it and affect others.
+	return &RedisReplyValue{value: nil}
 }
 
-// ForEach iterates through the remaining items, executing the action function for each item.
+// ForEach iterates through the REMAINING items starting from the current cursor
+// position, executing the action function for each item. The index passed to
+// action is the absolute index within the underlying array (not zero-based from
+// the start of the ForEach call). After ForEach returns, the cursor is advanced
+// past the last consumed item.
 func (r *RedisArrayReplyReader) ForEach(action func(i int, v *RedisReplyValue) error) error {
-	for i, v := range r.redisReply {
-		err := action(i, &RedisReplyValue{value: v})
-		if err != nil {
+	for r.position < len(r.redisReply) {
+		i := r.position
+		v := &RedisReplyValue{value: r.redisReply[i]}
+		r.position++
+		if err := action(i, v); err != nil {
 			return err
 		}
 	}

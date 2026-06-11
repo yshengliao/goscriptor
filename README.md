@@ -1,7 +1,7 @@
 # Goscriptor — Zero-Dependency Redis Script Manager for Go
 
 [![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://go.dev/)
-![Status](https://img.shields.io/badge/status-v0.5.1--alpha-orange.svg)
+![Status](https://img.shields.io/badge/status-v1.0.0-brightgreen.svg)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![AI Generated](https://img.shields.io/badge/AI_Generated-Antigravity-blueviolet.svg)
@@ -16,7 +16,7 @@
 - **Lua script lifecycle** — register, cache (SHA1), and execute atomically
 - **Production-grade connection pool** — max connections, idle timeout, connection age, waiter queue
 - **Standalone Redis client** — usable independently via `goscriptor/redis` sub-package
-- **20+ built-in commands** — String, Hash, List, Set, Key operations
+- **24 built-in data commands** — String, Hash, List, Set, Key operations; plus Ping, FlushAll, Do, Eval, EvalSha, ScriptLoad, ScriptExists in the client
 
 > **Note:** This library uses `SELECT` internally for DB isolation. **Redis Cluster is not supported.**
 
@@ -34,6 +34,7 @@ package main
 import (
     "context"
     "fmt"
+    "log"
 
     "github.com/yshengliao/goscriptor"
 )
@@ -48,14 +49,17 @@ func main() {
         "hello": `return 'Hello, World!'`,
     }
 
-    s, err := goscriptor.NewDB(opt, 1, "myapp|v1.0", scripts)
+    ctx := context.Background()
+    s, err := goscriptor.NewDB(ctx, opt, 1, "myapp|v1.0", scripts)
     if err != nil {
-        panic(err)
+        log.Fatal(err)
     }
     defer s.Close()
 
-    ctx := context.Background()
-    res, _ := s.ExecSha(ctx, "hello", []string{})
+    res, err := s.ExecSha(ctx, "hello", []string{})
+    if err != nil {
+        log.Fatal(err)
+    }
     fmt.Println(res) // Hello, World!
 }
 ```
@@ -96,15 +100,15 @@ func main() {
 
 ```
 goscriptor/
-├── scriptor.go      Scriptor — main API (Exec, ExecSha)
-├── script.go        ScriptDescriptor — register, cache, load
-├── option.go        Option — convenience constructor
-├── reply.go         RedisArrayReplyReader — type-safe reply parsing
+├── scriptor.go      Scriptor — main API (Exec, ExecSha, Close)
+├── script.go        internal script registration and SHA1 caching helpers
+├── option.go        Option — convenience constructor for NewDB
 ├── errors.go        Sentinel errors
 ├── redis/           Standalone Redis client (public sub-package)
-│   ├── client.go    Client, connection pool, pool stats
+│   ├── client.go    Client, connection pool, Ping, FlushAll, Do,
+│   │                Eval, EvalSha, ScriptLoad, ScriptExists
 │   ├── resp.go      RESP2 protocol encoder/decoder
-│   └── commands.go  20+ built-in Redis commands
+│   └── commands.go  24 data commands (String, Hash, List, Set, Key)
 └── example/
     └── main.go      Usage example
 ```
@@ -121,7 +125,7 @@ goscriptor/
 | `WriteTimeout` | 3s | Per-command write deadline |
 | `DialTimeout` | 5s | Timeout for new TCP connections |
 
-Set any timeout to `-1` to disable it.
+Set any timeout to `-1` to disable it (context deadline then governs I/O).
 
 ```go
 stats := client.PoolStats()
@@ -141,14 +145,27 @@ fmt.Printf("Active: %d, Idle: %d, Waiters: %d\n",
 | **Script** | `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` |
 | **Server** | `Ping`, `FlushAll`, `Do` (raw command) |
 
+> **Concurrency note:** `Scriptor` is safe for concurrent use by multiple goroutines.
+> Issuing a raw `SELECT` via `s.Client.Do(ctx, "SELECT", n)` will poison pooled
+> connections. Use the `DB` field in `Option`/`Options` instead.
+
 ## Testing
+
+Unit tests run without a Redis server. Integration tests are skipped unless
+`REDIS_ADDR` is set. CI runs both with `-race` and a `redis:7` service container,
+and uploads a coverage artifact.
 
 ```bash
 # Unit tests (no Redis required)
 go test ./...
 
 # Integration tests (requires running Redis)
-REDIS_ADDR=127.0.0.1:6379 go test -v ./...
+# -p 1 runs packages serially: the root and redis packages share the same Redis
+# instance, so parallel execution causes cross-package test interference.
+REDIS_ADDR=127.0.0.1:6379 go test -p 1 ./...
+
+# Race detector (CI also runs this)
+REDIS_ADDR=127.0.0.1:6379 go test -race -p 1 ./...
 ```
 
 ## Documentation
@@ -158,11 +175,44 @@ REDIS_ADDR=127.0.0.1:6379 go test -v ./...
 
 ## Changelog
 
+### v1.0.0
+
+This is the first stable release. It contains breaking API changes from v0.5.x
+(ctx-aware constructors, `ErrEmptyScript`, narrowed exported surface) — hence the
+major version bump per Semantic Versioning.
+
+- **Connection pool overhaul**: Fixed data race on waiter list, lost wakeups, and
+  `Close`/reaper synchronisation. `MinIdle` connections are now pre-warmed
+  asynchronously at client creation and replenished by the background reaper every
+  30 s. Server error replies (`-ERR`, `NOSCRIPT`, `WRONGTYPE`) no longer discard the
+  connection; only transport errors do.
+- **NOSCRIPT self-healing**: `ExecSha` retains the original script body. On Redis
+  restart or `SCRIPT FLUSH` it reloads the script, re-persists the SHA1, and retries
+  once automatically. Scriptors created from the load-from-cache path (nil/empty
+  scripts map) cannot self-heal and return `ErrScriptNotCached`.
+- **Breaking change**: `New` and `NewDB` now accept a leading `context.Context` so
+  the caller controls the startup deadline. The old internal 5 s timeout is removed.
+- **`Option` pool tuning fields**: `MinIdle`, `DialTimeout`, `ReadTimeout`,
+  `WriteTimeout`, `IdleTimeout`, `MaxConnAge` are now part of `goscriptor.Option`
+  (0 = default, -1 = disable). `NewDB` validates `Host`/`Port`.
+- **`ErrEmptyScript`**: `Exec("")` now returns the new sentinel `ErrEmptyScript`
+  (errors.go now has 6 sentinels).
+- **RESP hardening**: `ReadReply` enforces 512 MB bulk / 16 M array length caps and
+  integer-overflow checks. `WriteCommand` accepts `int32`, `int64`, `float32` (`f`
+  notation), `float64`, `bool` (`"1"`/`"0"`); unsupported types return an error.
+- **TTL fixes**: `Set` floors sub-millisecond TTLs to 1 ms (PX); `Expire` rounds
+  sub-second durations up to 1 s to avoid the truncation-to-zero that would silently
+  delete the key.
+- **script.go cleanup**: dead code removed, value sentinels added, real error
+  propagation. SHA body verification: a changed body under the same name wins.
+- **Test de-flaking** and **GitHub Actions CI**: `gofmt`+`vet`+`build`+`go test -race`
+  unit job, plus `redis:7` service integration job with coverage artifact.
+
 ### v0.5.2-alpha
 - **Performance**: Achieved near zero-allocation for RESP2 serialization using `sync.Pool` (PING: 20 B/op, 2 allocs/op).
 - **Performance**: Optimized `ReadReply` to avoid string allocations during integer parsing.
 - **Bug Fix**: Fixed a critical nil pointer dereference issue when waking waiting goroutines in the connection pool via `Close()`.
-- **Tests**: Increased test coverage to 79% (pool exhaustion, waiter cancellation, robust RESP parsing).
+- **Tests**: Increased test coverage (pool exhaustion, waiter cancellation, robust RESP parsing).
 
 ### v0.5.1-alpha (2026-04-24)
 
@@ -195,24 +245,26 @@ MIT License — see [LICENSE](LICENSE).
 
 This project relies on real Redis for integration tests to ensure RESP2 correctness and connection pool reliability. The underlying custom client has been rigorously optimized for zero-allocation command formatting and bulk string parsing.
 
-Run the tests and benchmarks locally (requires a running Redis instance at `127.0.0.1:6379`):
+Run the benchmarks locally (requires a running Redis instance):
 
 ```bash
-$ REDIS_ADDR=127.0.0.1:6379 go test -bench=. -benchmem ./...
+REDIS_ADDR=127.0.0.1:6379 go test -bench=. -benchmem -run='^$' ./redis/
 ```
 
-**Benchmark Results (Apple M3 Pro):**
+**Benchmark Results (Linux container, Intel Xeon @ 2.80 GHz):**
 
 ```text
-goos: darwin
-goarch: arm64
-pkg: github.com/yshengliao/goscriptor
-cpu: Apple M3 Pro
-BenchmarkPing-12           13921             85492 ns/op              20 B/op          2 allocs/op
-BenchmarkGet-12            14032             84385 ns/op              96 B/op          4 allocs/op
+goos: linux
+goarch: amd64
+pkg: github.com/yshengliao/goscriptor/redis
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkPing-4   	   16210	     74665 ns/op	      20 B/op	       2 allocs/op
+BenchmarkGet-4    	   15558	     86597 ns/op	      96 B/op	       4 allocs/op
 PASS
-ok      github.com/yshengliao/goscriptor        4.150s
+ok  	github.com/yshengliao/goscriptor/redis	4.095s
 ```
 
-*   **Zero-Allocation formatting**: Writing RESP2 commands leverages `sync.Pool`, eliminating dynamic memory allocation during normal request lifecycles.
-*   **Minimal Parsing Allocation**: `ReadReply` uses `bufio.Reader.ReadLine()` and custom byte parsing instead of strings, bringing `PING` down to just `2 allocs/op` (20 Bytes/op).
+*Absolute numbers vary by hardware; the allocation counts are the meaningful metric.*
+
+- **Zero-allocation formatting**: Writing RESP2 commands leverages `sync.Pool`, eliminating dynamic memory allocation during normal request lifecycles.
+- **Minimal parsing allocation**: `ReadReply` uses `bufio.Reader.ReadLine()` and custom byte parsing instead of strings, bringing `PING` down to just `2 allocs/op` (20 Bytes/op).
