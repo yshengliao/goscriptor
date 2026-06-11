@@ -245,13 +245,24 @@ func TestPool_CloseWhileWaiting(t *testing.T) {
 
 	const poolSize = 2
 	c := NewClient(&Options{Addr: fs.addr(), PoolSize: poolSize})
+	// Settle the warm-up dial (MinIdle defaults to 1) before saturating.
+	// dialIdle prefers handing its fresh conn to a queued waiter, so a warm-up
+	// still in flight here could complete after the waiters below have queued
+	// and hand one of THEM a connection; that waiter would then block in
+	// ReadReply against the never-replying server instead of observing Close.
+	// An in-flight warm-up reservation also lets the Active==poolSize check
+	// pass before both saturators actually hold their connections.
+	waitIdle(t, c, 1)
 
 	ctx := context.Background()
 	// Saturate the pool: these calls block in ReadReply holding a conn each.
 	for i := 0; i < poolSize; i++ {
 		go func() { c.Do(ctx, "PING") }()
 	}
-	if !waitFor(2*time.Second, func() bool { return c.PoolStats().Active == poolSize }) {
+	if !waitFor(2*time.Second, func() bool {
+		s := c.PoolStats()
+		return s.Active == poolSize && s.Idle == 0
+	}) {
 		t.Fatalf("pool never saturated: %+v", c.PoolStats())
 	}
 
@@ -276,8 +287,12 @@ func TestPool_CloseWhileWaiting(t *testing.T) {
 			if !errors.Is(err, errClosed) {
 				t.Fatalf("waiter got %v, want errClosed", err)
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("waiter did not return after Close")
+		// The budget must exceed the 3s default read deadline: if a waiter were
+		// ever wrongly handed a connection it would surface here as a
+		// wrong-error assertion failure (I/O timeout) rather than an opaque
+		// receive timeout.
+		case <-time.After(5 * time.Second):
+			t.Fatalf("waiter did not return after Close; stats=%+v", c.PoolStats())
 		}
 	}
 }
