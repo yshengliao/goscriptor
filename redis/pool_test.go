@@ -720,6 +720,64 @@ func TestPool_CtxDeadlineOnSocket(t *testing.T) {
 	}
 }
 
+// dialTimeout accessor semantics must match the sibling timeout fields:
+// 0 = default, -1 = disabled (no internal dial deadline).
+func TestPool_DialTimeoutAccessor(t *testing.T) {
+	if got := (&Options{}).dialTimeout(); got != defaultDialTimeout {
+		t.Fatalf("zero value: got %v, want default %v", got, defaultDialTimeout)
+	}
+	if got := (&Options{DialTimeout: 2 * time.Second}).dialTimeout(); got != 2*time.Second {
+		t.Fatalf("explicit value: got %v, want 2s", got)
+	}
+	if got := (&Options{DialTimeout: -1}).dialTimeout(); got != 0 {
+		t.Fatalf("disabled (-1): got %v, want 0", got)
+	}
+}
+
+// With DialTimeout disabled (-1), dialConn must use the caller ctx as-is: the
+// dial and init commands stay bounded by the ctx deadline, and the ctx must
+// not be wrapped in a zero-duration WithTimeout (which would expire
+// immediately). The server accepts but never answers AUTH, so a correct
+// implementation fails at the ~150ms ctx deadline — not instantly (collapsed
+// ctx) and not at the 3s default read deadline.
+func TestPool_DialTimeoutDisabledRespectsCtxDeadline(t *testing.T) {
+	fs := newFakeServer(t, func(fs *fakeServer, idx int, c net.Conn) {
+		r := bufio.NewReader(c)
+		readCommand(r) // AUTH arrives; never reply
+		fs.block()
+	})
+	defer fs.close()
+
+	// PoolSize 2: the MinIdle warm-up dial (background ctx, no deadline)
+	// occupies one slot blocked in AUTH; the measured Do below dials the
+	// second slot itself, so its ctx governs the whole dial+init sequence.
+	c := NewClient(&Options{
+		Addr:        fs.addr(),
+		Password:    "secret",
+		PoolSize:    2,
+		MinIdle:     1,
+		DialTimeout: -1,
+	})
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.Do(ctx, "PING")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from the never-answering AUTH")
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("Do failed after only %v: ctx collapsed instantly, DialTimeout=-1 not honored", elapsed)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Do took %v: ctx deadline (150ms) not applied during dial/init", elapsed)
+	}
+}
+
 // TestPool_AbandonForwardsRetrySignal pins the rule that a cancelling waiter
 // which consumed a nil retry-signal must forward it to the next waiter:
 // otherwise the freed-slot notification dies with the canceller and the

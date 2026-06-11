@@ -45,8 +45,10 @@ type Options struct {
 	// Default: 1.
 	MinIdle int
 
-	// DialTimeout is the timeout for establishing new connections.
-	// Default: 5s.
+	// DialTimeout is the timeout for establishing new connections. When set
+	// to -1 (disabled) dialing is only constrained by the caller ctx deadline,
+	// if any, and the OS-level connection timeout.
+	// Default: 5s. Set to -1 to disable.
 	DialTimeout time.Duration
 
 	// ReadTimeout is the per-command read deadline. The effective read
@@ -90,6 +92,9 @@ func (o *Options) minIdle() int {
 func (o *Options) dialTimeout() time.Duration {
 	if o.DialTimeout > 0 {
 		return o.DialTimeout
+	}
+	if o.DialTimeout < 0 {
+		return 0 // disabled
 	}
 	return defaultDialTimeout
 }
@@ -324,8 +329,17 @@ func (c *Client) ensureMinIdle() {
 }
 
 func (c *Client) dialConn(ctx context.Context) (*conn, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, c.opts.dialTimeout())
-	defer cancel()
+	// dialTimeout() == 0 means DialTimeout was set to -1 (disabled): use the
+	// caller ctx as-is instead of wrapping it in a zero-duration WithTimeout,
+	// which would expire immediately.
+	dt := c.opts.dialTimeout()
+
+	dialCtx := ctx
+	if dt > 0 {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, dt)
+		defer cancel()
+	}
 
 	var d net.Dialer
 	nc, err := d.DialContext(dialCtx, "tcp", c.opts.Addr)
@@ -339,8 +353,14 @@ func (c *Client) dialConn(ctx context.Context) (*conn, error) {
 		usedAt:    time.Now(),
 	}
 
-	initCtx, initCancel := context.WithTimeout(ctx, c.opts.dialTimeout())
-	defer initCancel()
+	// The init commands get a fresh dialTimeout budget of their own (derived
+	// from the original ctx, not from dialCtx).
+	initCtx := ctx
+	if dt > 0 {
+		var initCancel context.CancelFunc
+		initCtx, initCancel = context.WithTimeout(ctx, dt)
+		defer initCancel()
+	}
 
 	// Note: although initCtx carries a dialTimeout deadline, the AUTH/SELECT
 	// round-trips below run through execOn, whose socket deadline is the

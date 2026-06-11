@@ -25,8 +25,10 @@ type Option struct {
 	// Default: 1.
 	MinIdle int
 
-	// DialTimeout is the timeout for establishing new connections.
-	// Default: 5s.
+	// DialTimeout is the timeout for establishing new connections. When set
+	// to -1 (disabled) dialing is only constrained by the caller ctx deadline,
+	// if any, and the OS-level connection timeout.
+	// Default: 5s. Set to -1 to disable.
 	DialTimeout time.Duration
 
 	// ReadTimeout is the per-command read deadline. The effective read deadline
