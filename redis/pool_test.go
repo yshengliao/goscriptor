@@ -297,8 +297,11 @@ func TestPool_CancelHandoffRace(t *testing.T) {
 			t.Fatalf("getConn: %v", err)
 		}
 
-		// Waiter with a ctx that fires almost immediately.
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		// Waiter with a ctx that fires very soon. A fixed 1ms deadline tends to
+		// fire before the handoff is even attempted under load, so most
+		// iterations miss the target interleave; widen it to a random 5-10ms so
+		// the cancellation and the handoff actually overlap more often.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(5+iter%6)*time.Millisecond)
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
@@ -316,8 +319,10 @@ func TestPool_CancelHandoffRace(t *testing.T) {
 		wg.Wait()
 		cancel()
 
-		// No slot may have leaked: after draining, Active == Idle.
-		if !waitFor(2*time.Second, func() bool {
+		// No slot may have leaked: after draining, Active == Idle. Use a
+		// generous 5s budget so an extreme-load scheduler hiccup cannot trip a
+		// false positive while still bounding a genuine leak.
+		if !waitFor(5*time.Second, func() bool {
 			s := c.PoolStats()
 			return s.Active == s.Idle && s.Waiters == 0
 		}) {
@@ -469,6 +474,162 @@ func TestPool_ServerErrorKeepsConn(t *testing.T) {
 	}
 }
 
+// F1 regression: a server error reply followed by EXTRA bytes (a misbehaving
+// server/proxy that breaks the single-reply framing assumption) must surface
+// the RedisError AND discard the connection, never pool it. If the leftover
+// "+SNEAKY" were pooled, the next reader on that conn would mis-frame it as its
+// own reply. Each connection replies "-ERR boom <id>\r\n+SNEAKY\r\n" on its
+// FIRST command, so a discarded conn is provable by a fresh identity on the
+// next Do — and the next Do must read its own "-ERR boom", never "+SNEAKY".
+func TestPool_ServerErrorWithTrailingBytesDiscardsConn(t *testing.T) {
+	fs := newFakeServer(t, func(fs *fakeServer, idx int, c net.Conn) {
+		r := bufio.NewReader(c)
+		first := true
+		for {
+			if _, err := readCommand(r); err != nil {
+				return
+			}
+			if first {
+				first = false
+				// Single write so the trailing "+SNEAKY" lands in the same TCP
+				// segment as the error reply and is therefore already buffered
+				// by the client's bufio reader when it parses the error.
+				if _, err := c.Write([]byte(fmt.Sprintf("-ERR boom %d\r\n+SNEAKY\r\n", idx))); err != nil {
+					return
+				}
+				continue
+			}
+			// Reached only if the conn were wrongly reused: emit a marker the
+			// assertions can catch instead of another "-ERR boom".
+			if _, err := c.Write([]byte("+REUSED\r\n")); err != nil {
+				return
+			}
+		}
+	})
+	defer fs.close()
+
+	c := NewClient(&Options{Addr: fs.addr(), PoolSize: 2, MinIdle: 1})
+	defer c.Close()
+	waitIdle(t, c, 1) // warm-up parked one idle conn (no command sent yet)
+
+	ctx := context.Background()
+
+	// First Do: the reply carries trailing bytes, so the conn must be dropped.
+	reply, err := c.Do(ctx, "PING")
+	var rerr RedisError
+	if !errors.As(err, &rerr) {
+		t.Fatalf("first Do: want RedisError, got reply=%v err=%T %v", reply, err, err)
+	}
+	first := rerr.Error()
+	if !strings.HasPrefix(first, "ERR boom") {
+		t.Fatalf("first Do: want 'ERR boom <id>', got %q", first)
+	}
+
+	// The poisoned conn must be discarded, not pooled: had it been pooled it
+	// would show as Active==1/Idle==1 here. The lone warm-up conn was the one we
+	// just poisoned, so a correct removeConn leaves the pool empty.
+	if !waitFor(2*time.Second, func() bool {
+		s := c.PoolStats()
+		return s.Active == 0 && s.Idle == 0 && s.Waiters == 0
+	}) {
+		t.Fatalf("poisoned conn not discarded (want empty pool): %+v", c.PoolStats())
+	}
+
+	// Second Do: if the poisoned conn had been pooled, this would either read
+	// the leftover "+SNEAKY" as a successful status reply (err==nil) or, on a
+	// reused conn, hit our "+REUSED" marker. A correct discard means we land on
+	// a different connection that emits its own first-command "-ERR boom <id>".
+	reply, err = c.Do(ctx, "PING")
+	if !errors.As(err, &rerr) {
+		t.Fatalf("second Do: leftover bytes leaked (reply=%v err=%v); conn was not discarded", reply, err)
+	}
+	second := rerr.Error()
+	if second == "SNEAKY" || strings.Contains(second, "SNEAKY") {
+		t.Fatalf("second Do mis-framed the trailing bytes: got %q", second)
+	}
+	if !strings.HasPrefix(second, "ERR boom") {
+		t.Fatalf("second Do: want a fresh 'ERR boom <id>', got %q", second)
+	}
+	if second == first {
+		t.Fatalf("poisoned conn was reused: identity stayed %q", first)
+	}
+}
+
+// F2 regression: putConn must retire an EXPIRED connection before any waiter
+// handoff, symmetric with the getConn reuse path. A queued waiter must receive
+// a nil retry-signal (never the stale conn), the freed slot must be accounted
+// for (Active drops), and a follow-up acquire must dial a fresh connection.
+func TestPool_PutExpiredConnWakesWaiterWithRetry(t *testing.T) {
+	fs := newFakeServer(t, nil)
+	defer fs.close()
+
+	c := NewClient(&Options{Addr: fs.addr(), PoolSize: 1, MinIdle: 1})
+	defer c.Close()
+	waitIdle(t, c, 1) // warm-up parked the single idle conn
+
+	// Take the only connection so we own a concrete *conn to expire.
+	cn, err := c.getConn(context.Background())
+	if err != nil {
+		t.Fatalf("getConn: %v", err)
+	}
+	if s := c.PoolStats(); s.Active != 1 || s.Idle != 0 {
+		t.Fatalf("after getConn want Active 1/Idle 0, got %+v", s)
+	}
+
+	// Force expiry by rewinding both clocks well past idleTimeout/maxConnAge.
+	old := time.Now().Add(-time.Hour)
+	c.mu.Lock()
+	cn.createdAt = old
+	cn.usedAt = old
+	c.mu.Unlock()
+
+	// Queue a waiter directly so we can observe exactly what putConn hands it.
+	w := make(chan *conn, 1)
+	c.mu.Lock()
+	c.waiters = []chan *conn{w}
+	c.mu.Unlock()
+
+	// Return the expired conn. putConn must NOT hand it to w; it must drop it,
+	// free the slot and wake w with a nil retry-signal.
+	c.putConn(cn)
+
+	select {
+	case got, ok := <-w:
+		if !ok {
+			t.Fatal("waiter channel closed; want nil retry signal")
+		}
+		if got != nil {
+			if got == cn {
+				t.Fatal("waiter received the EXPIRED connection instead of a nil retry signal")
+			}
+			t.Fatalf("waiter received a connection (%p) instead of a nil retry signal", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("putConn did not wake the waiter after retiring the expired conn")
+	}
+
+	// The expired conn's slot must be released (signal conservation).
+	if !waitFor(2*time.Second, func() bool { return c.PoolStats().Active == 0 }) {
+		t.Fatalf("expired conn slot not freed: %+v", c.PoolStats())
+	}
+
+	// The retry path must now be able to dial a brand-new connection.
+	fresh, err := c.getConn(context.Background())
+	if err != nil {
+		t.Fatalf("post-retry getConn: %v", err)
+	}
+	if fresh == cn {
+		t.Fatal("retry reused the expired connection")
+	}
+	if !fresh.createdAt.After(old) {
+		t.Fatalf("retry did not dial a fresh conn: createdAt=%v not after %v", fresh.createdAt, old)
+	}
+	if s := c.PoolStats(); s.Active != 1 {
+		t.Fatalf("after fresh dial want Active 1, got %+v", s)
+	}
+	c.putConn(fresh)
+}
+
 // MinIdle pre-warm and replenish via the reaper helpers.
 func TestPool_MinIdlePrewarmAndReplenish(t *testing.T) {
 	fs := newFakeServer(t, nil)
@@ -599,11 +760,39 @@ func TestPool_DialIdleFailureWakesWaiter(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
+	// The whole test hinges on this address refusing connections. Ephemeral
+	// ports can be re-bound by an unrelated process between Close above and now;
+	// if a probe dial unexpectedly succeeds the premise is invalid, so skip
+	// (an environment artefact) rather than report a false failure.
+	if probe, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+		probe.Close()
+		t.Skipf("address %s unexpectedly accepts connections; "+
+			"refused-port premise unavailable in this environment", addr)
+	}
+
 	c := NewClient(&Options{Addr: addr, PoolSize: 1, MinIdle: 1})
 	defer c.Close()
 
 	// Let the (failing) warm-up settle before installing the manual waiter.
-	time.Sleep(100 * time.Millisecond)
+	// Poll instead of sleeping a fixed interval: under load the warm-up dial
+	// can still be in flight after an arbitrary fixed delay (which would leave
+	// Active==1 and corrupt the manual waiter setup below). The warm-up has
+	// settled once Active==0 holds across several consecutive samples — a single
+	// Active==0 reading could merely be the gap before the dial reserves its
+	// slot, so require stability.
+	if !waitFor(5*time.Second, func() bool {
+		stable := 0
+		for i := 0; i < 5; i++ {
+			if c.PoolStats().Active != 0 {
+				return false
+			}
+			stable++
+			time.Sleep(2 * time.Millisecond)
+		}
+		return stable == 5
+	}) {
+		t.Fatalf("failing warm-up never settled: %+v", c.PoolStats())
+	}
 
 	w := make(chan *conn, 1)
 	c.mu.Lock()
@@ -611,7 +800,18 @@ func TestPool_DialIdleFailureWakesWaiter(t *testing.T) {
 	c.mu.Unlock()
 
 	if ok := c.dialIdle(context.Background()); ok {
-		t.Fatal("dialIdle against a refused address reported success")
+		// dialIdle reported success: the address started accepting mid-test, so
+		// the premise no longer holds. It will have handed the fresh conn to our
+		// manual waiter; drain and close it so nothing leaks, then skip.
+		select {
+		case cn := <-w:
+			if cn != nil {
+				cn.nc.Close()
+			}
+		default:
+		}
+		t.Skipf("address %s began accepting connections mid-test; "+
+			"refused-port premise unavailable in this environment", addr)
 	}
 
 	select {

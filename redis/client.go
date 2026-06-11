@@ -342,6 +342,11 @@ func (c *Client) dialConn(ctx context.Context) (*conn, error) {
 	initCtx, initCancel := context.WithTimeout(ctx, c.opts.dialTimeout())
 	defer initCancel()
 
+	// Note: although initCtx carries a dialTimeout deadline, the AUTH/SELECT
+	// round-trips below run through execOn, whose socket deadline is the
+	// earlier of (now+readTimeout) and the ctx deadline. The effective bound on
+	// these init commands is therefore min(dialTimeout, readTimeout) — by
+	// default readTimeout (3s) rather than dialTimeout (5s).
 	if c.opts.Password != "" {
 		if _, err := c.execOn(initCtx, cn, "AUTH", c.opts.Password); err != nil {
 			nc.Close()
@@ -517,20 +522,25 @@ func (c *Client) putConn(cn *conn) {
 		return
 	}
 
+	// Retire an expired connection BEFORE the waiter handoff so a waiter can
+	// never be handed a stale connection — this keeps putConn symmetric with
+	// the getConn reuse path, which also discards expired idle conns. Free the
+	// slot and wake one waiter (signal conservation) so a queued caller retries
+	// the acquire loop and dials a fresh connection; the actual Close happens
+	// outside the lock.
+	if cn.isExpired(c.opts.idleTimeout(), c.opts.maxConnAge()) {
+		c.active--
+		c.wakeOneWaiterLocked()
+		c.mu.Unlock()
+		cn.nc.Close()
+		return
+	}
+
 	// Hand off to a waiter directly (atomic dequeue+send under mu).
 	if w := c.popWaiterLocked(); w != nil {
 		cn.usedAt = time.Now()
 		w <- cn
 		c.mu.Unlock()
-		return
-	}
-
-	// No waiter exists and we hold mu throughout, so retiring an expired
-	// connection here cannot strand a wakeup.
-	if cn.isExpired(c.opts.idleTimeout(), c.opts.maxConnAge()) {
-		c.active--
-		c.mu.Unlock()
-		cn.nc.Close()
 		return
 	}
 
@@ -630,8 +640,19 @@ func (c *Client) Do(ctx context.Context, args ...any) (any, error) {
 	if err != nil {
 		var rerr RedisError
 		if errors.As(err, &rerr) {
-			// Server-side error: connection is still usable.
-			c.putConn(cn)
+			// Server-side error: the connection is normally still usable and
+			// can be reused. This relies on the single-reply framing
+			// assumption — one command in, exactly one reply out. Defend
+			// against a misbehaving server/proxy that sends extra bytes after
+			// the error reply: if anything is left buffered, the next reader
+			// would mis-frame the leftover as its own reply, so discard the
+			// connection instead of pooling it. The error is still returned to
+			// the caller either way.
+			if cn.rd.Buffered() == 0 {
+				c.putConn(cn)
+			} else {
+				c.removeConn(cn)
+			}
 		} else {
 			// Transport/protocol error: discard the connection.
 			c.removeConn(cn)
