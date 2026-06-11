@@ -46,9 +46,10 @@ client := redis.NewClient(&redis.Options{
 ### 背景清理器（Reaper）
 
 每 30 秒執行一次：
-1. 清除所有超過 `IdleTimeout` 或 `MaxConnAge` 的連線（同時保留至少 `MinIdle` 個
-   連線存活）。
-2. 重新補充閒置連線至 `MinIdle`。
+1. 逐出**所有**過期連線——超過 `IdleTimeout` 或 `MaxConnAge` 的連線。為了滿足
+   `MinIdle` 而保留過期連線的做法**不適用**；`MinIdle` 最低水位改由步驟 2 以全新
+   連線補足。
+2. 以全新連線補充閒置池至 `MinIdle`（`ensureMinIdle`）。
 
 ### 等待佇列
 

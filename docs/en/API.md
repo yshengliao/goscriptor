@@ -262,7 +262,9 @@ func (c *Client) FlushAll(ctx context.Context) error
 #### `WriteCommand`
 
 Serialises a Redis command in RESP2 array format. Supported argument types:
-`string`, `[]byte`, `int`, `int64`. All other types are serialised via `fmt.Sprint`.
+`string`, `[]byte`, `int`, `int32`, `int64`, `float32`, `float64` (formatted with
+`'f'` notation, no scientific notation), `bool` (`"1"` for `true`, `"0"` for
+`false`). Any other type, including `nil`, returns an error.
 
 ```go
 func WriteCommand(w io.Writer, args ...any) error

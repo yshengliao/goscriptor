@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# GitHub Actions will enforce Node 24 for all JavaScript actions on 2026-06-16.
+# This variable opts in early so CI catches any Node 24 incompatibilities before
+# the deadline.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   lint-and-unit:
     name: Lint and Unit Tests

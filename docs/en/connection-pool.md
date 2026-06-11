@@ -52,9 +52,10 @@ background reaper also replenishes idle connections back to `MinIdle` after each
 ### Background Reaper
 
 A goroutine runs every 30 seconds to:
-1. Evict all connections that exceed `IdleTimeout` or `MaxConnAge` (while keeping at
-   least `MinIdle` connections alive).
-2. Replenish idle connections back up to `MinIdle` with fresh dials.
+1. Evict **all** expired connections — those that exceed `IdleTimeout` or
+   `MaxConnAge`. Connections needed to satisfy `MinIdle` are **not** kept alive if
+   they are expired; `MinIdle` is enforced in step 2 with fresh connections instead.
+2. Replenish idle connections back up to `MinIdle` with fresh dials (`ensureMinIdle`).
 
 ### Waiter Queue
 

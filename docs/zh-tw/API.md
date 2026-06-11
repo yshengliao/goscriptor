@@ -251,7 +251,8 @@ func (c *Client) FlushAll(ctx context.Context) error
 #### `WriteCommand`
 
 以 RESP2 array 格式序列化 Redis 指令。支援的引數型別：`string`、`[]byte`、`int`、
-`int64`。其他型別透過 `fmt.Sprint` 序列化。
+`int32`、`int64`、`float32`、`float64`（使用 `'f'` 格式，無科學記號）、`bool`
+（`true` 編碼為 `"1"`，`false` 編碼為 `"0"`）。其他型別（包括 `nil`）回傳錯誤。
 
 ```go
 func WriteCommand(w io.Writer, args ...any) error
